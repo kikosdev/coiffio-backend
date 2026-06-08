@@ -14,6 +14,15 @@ export enum NotifType {
   SALE_RECORDED         = 'sale_recorded',
   LOW_STOCK             = 'low_stock',
   OUT_OF_STOCK          = 'out_of_stock',
+  // Orders e-commerce
+  ORDER_CREATED         = 'order_created',
+  ORDER_CONFIRMED       = 'order_confirmed',
+  ORDER_PREPARING       = 'order_preparing',
+  ORDER_READY           = 'order_ready',
+  ORDER_SHIPPED         = 'order_shipped',
+  ORDER_DELIVERED       = 'order_delivered',
+  ORDER_CANCELLED       = 'order_cancelled',
+  ORDER_REFUNDED        = 'order_refunded',
 }
 
 @Schema({ timestamps: true })

@@ -28,6 +28,19 @@ export class Product {
 
   @Prop({ default: true })
   isActive: boolean;
+
+  // E-commerce public fields
+  @Prop({ default: false })
+  isPublic: boolean;
+
+  @Prop()
+  publicDescription?: string;
+
+  @Prop({ type: [String], default: [] })
+  images: string[];
+
+  @Prop({ default: 0 })
+  salesCount: number;
 }
 
 export const ProductSchema = SchemaFactory.createForClass(Product);
