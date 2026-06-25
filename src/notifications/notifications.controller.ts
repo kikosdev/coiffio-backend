@@ -1,38 +1,30 @@
-import { Controller, Get, Patch, Delete, Param, Query, UseGuards, Request } from '@nestjs/common';
+import { Controller, Get, Param, Post, Req, UseGuards } from '@nestjs/common';
+import { Request } from 'express';
 import { NotificationsService } from './notifications.service';
-import { JwtAuthGuard } from '../common/jwt-auth.guard';
+import { JwtGuard } from '../common/guards/jwt.guard';
+import { getSalonScope } from '../common/scope/salon-scope';
+import { CurrentUser, AuthUser } from '../common/decorators/current-user.decorator';
 
-interface AuthRequest {
-  user: { sub: string };
-}
-
-@UseGuards(JwtAuthGuard)
 @Controller('notifications')
+@UseGuards(JwtGuard)
 export class NotificationsController {
-  constructor(private readonly svc: NotificationsService) {}
+  constructor(private readonly notifications: NotificationsService) {}
 
   @Get()
-  findMine(@Request() req: AuthRequest, @Query('page') page?: string) {
-    return this.svc.findMine(req.user.sub, page ? parseInt(page) : 0);
+  async list(@Req() req: Request, @CurrentUser() user: AuthUser) {
+    const data = await this.notifications.list(getSalonScope(req), user);
+    return { data, message: 'OK' };
   }
 
-  @Get('unread-count')
-  unreadCount(@Request() req: AuthRequest) {
-    return this.svc.unreadCount(req.user.sub).then(count => ({ count }));
+  @Post(':id/read')
+  async read(@Req() req: Request, @CurrentUser() user: AuthUser, @Param('id') id: string) {
+    const data = await this.notifications.markRead(getSalonScope(req), user, id);
+    return { data, message: 'Marked read.' };
   }
 
-  @Patch('read-all')
-  markAllRead(@Request() req: AuthRequest) {
-    return this.svc.markAllRead(req.user.sub);
-  }
-
-  @Patch(':id/read')
-  markRead(@Param('id') id: string) {
-    return this.svc.markRead(id);
-  }
-
-  @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.svc.remove(id);
+  @Post('read-all')
+  async readAll(@Req() req: Request, @CurrentUser() user: AuthUser) {
+    const data = await this.notifications.readAll(getSalonScope(req), user);
+    return { data, message: 'All read.' };
   }
 }

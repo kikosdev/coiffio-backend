@@ -1,79 +1,71 @@
 import {
-  Controller, Get, Post, Patch, Delete,
-  Param, Body, Query, UseGuards, HttpCode, HttpStatus,
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Query,
+  Req,
+  UseGuards,
 } from '@nestjs/common';
-import { JwtAuthGuard } from '../common/jwt-auth.guard';
-import { RolesGuard }   from '../common/roles.guard';
-import { Roles }        from '../common/roles.decorator';
-import { UserRole }     from '../schemas/user.schema';
+import { Request } from 'express';
 import { ServicesService } from './services.service';
-import { CreateServiceDto } from './dto/create-service.dto';
-import { UpdateServiceDto } from './dto/update-service.dto';
-import { QueryServicesDto } from './dto/query-services.dto';
+import { CreateServiceDto, ListServicesQueryDto, UpdateServiceDto } from './dto/service.dto';
+import { JwtGuard } from '../common/guards/jwt.guard';
+import { RolesGuard } from '../common/guards/roles.guard';
+import { Roles } from '../common/decorators/roles.decorator';
+import { getSalonScope } from '../common/scope/salon-scope';
+import { ServiceDocument } from './schemas/service.schema';
 
+/**
+ * Catalogue services (Sprint 2). Matrice : lecture = tous (authentifiés) ;
+ * create/edit/delete = owner·manager. getSalonScope() partout. Enveloppe standard.
+ */
 @Controller('services')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtGuard, RolesGuard)
 export class ServicesController {
-  constructor(private readonly servicesService: ServicesService) {}
+  constructor(private readonly services: ServicesService) {}
 
-  /* ── Public-ish (any authenticated user) ── */
-
-  @Roles(UserRole.OWNER, UserRole.SUPERVISOR, UserRole.STAFF, UserRole.CLIENT)
+  // Lecture : tout user authentifié (pas de @Roles ⇒ RolesGuard laisse passer).
   @Get()
-  findAll(@Query() query: QueryServicesDto) {
-    return this.servicesService.findAll(query);
+  async list(
+    @Req() req: Request,
+    @Query() query: ListServicesQueryDto,
+  ): Promise<{ data: ServiceDocument[]; message: string }> {
+    const data = await this.services.findAll(getSalonScope(req), query.gender);
+    return { data, message: 'OK' };
   }
 
-  @Roles(UserRole.OWNER, UserRole.SUPERVISOR, UserRole.STAFF, UserRole.CLIENT)
-  @Get('categories')
-  findCategories() {
-    return this.servicesService.findCategories();
-  }
-
-  @Roles(UserRole.OWNER, UserRole.SUPERVISOR)
-  @Get('popular')
-  findPopular() {
-    return this.servicesService.findPopular();
-  }
-
-  @Roles(UserRole.OWNER, UserRole.SUPERVISOR, UserRole.STAFF, UserRole.CLIENT)
-  @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.servicesService.findOne(id);
-  }
-
-  /* ── Owner / Supervisor only ── */
-
-  @Roles(UserRole.OWNER, UserRole.SUPERVISOR)
   @Post()
-  create(@Body() dto: CreateServiceDto) {
-    return this.servicesService.create(dto);
+  @Roles('owner', 'manager')
+  async create(
+    @Req() req: Request,
+    @Body() dto: CreateServiceDto,
+  ): Promise<{ data: ServiceDocument; message: string }> {
+    const data = await this.services.create(getSalonScope(req), dto);
+    return { data, message: 'Service created.' };
   }
 
-  @Roles(UserRole.OWNER, UserRole.SUPERVISOR)
-  @Patch('reorder')
-  @HttpCode(HttpStatus.NO_CONTENT)
-  reorder(@Body() body: { items: { id: string; displayOrder: number }[] }) {
-    return this.servicesService.reorder(body.items);
-  }
-
-  @Roles(UserRole.OWNER, UserRole.SUPERVISOR)
   @Patch(':id')
-  update(@Param('id') id: string, @Body() dto: UpdateServiceDto) {
-    return this.servicesService.update(id, dto);
+  @Roles('owner', 'manager')
+  async update(
+    @Req() req: Request,
+    @Param('id') id: string,
+    @Body() dto: UpdateServiceDto,
+  ): Promise<{ data: ServiceDocument; message: string }> {
+    const data = await this.services.update(getSalonScope(req), id, dto);
+    return { data, message: 'Service updated.' };
   }
 
-  @Roles(UserRole.OWNER, UserRole.SUPERVISOR)
-  @Patch(':id/toggle-active')
-  toggleActive(@Param('id') id: string) {
-    return this.servicesService.toggleActive(id);
-  }
-
-  /* ── Owner only ── */
-
-  @Roles(UserRole.OWNER)
   @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.servicesService.remove(id);
+  @Roles('owner', 'manager')
+  async remove(
+    @Req() req: Request,
+    @Param('id') id: string,
+  ): Promise<{ data: ServiceDocument; message: string }> {
+    const data = await this.services.softDelete(getSalonScope(req), id);
+    return { data, message: 'Service archived.' };
   }
 }

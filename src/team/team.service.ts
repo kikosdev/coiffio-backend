@@ -1,114 +1,227 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
-import { TeamMember, TeamMemberDocument } from '../schemas/team-member.schema';
-import { LeaveRequest, LeaveRequestDocument, LeaveDecision } from '../schemas/leave-request.schema';
-import { PayPeriod, PayPeriodDocument } from '../schemas/pay-period.schema';
-import { computeSlip, Payslip } from './payroll.config';
+import * as bcrypt from 'bcryptjs';
+import { Staff, StaffDocument } from './schemas/staff.schema';
+import { Schedule, ScheduleDocument } from './schemas/schedule.schema';
+import { StaffProfile, StaffProfileDocument } from './schemas/staff-profile.schema';
+import { Appointment, AppointmentDocument } from '../booking/schemas/appointment.schema';
+import { CreateStaffDto, UpdateStaffDto } from './dto/team.dto';
+import { SalonScope } from '../common/scope/salon-scope';
+import { AuthUser } from '../common/decorators/current-user.decorator';
 
-type WeekDay = number[] | 'leave' | null;
+const MANAGERS = ['owner', 'manager'];
+const BCRYPT_ROUNDS = 10;
+const MS_PER_MIN = 60_000;
+
+export interface PublicStaff {
+  id: string;
+  name: string;
+  email: string;
+  phone: string;
+  role: string;
+  color: string;
+  isActive: boolean;
+  level?: string;
+  capabilities?: string[];
+  baseRate?: number;
+  commissionPct?: number;
+}
+
+export interface StylistStanding {
+  stylistId: string;
+  name: string;
+  level: string;
+  baseRate: number;
+  commissionPct: number;
+  upcomingShifts: { date: string; start: string; end: string }[];
+  completedCount: number;
+  upcomingCount: number;
+  grossServices: number;
+  estimatedCommission: number;
+  tips: number;
+}
 
 @Injectable()
 export class TeamService {
   constructor(
-    @InjectModel(TeamMember.name) private memberModel: Model<TeamMemberDocument>,
-    @InjectModel(LeaveRequest.name) private leaveModel: Model<LeaveRequestDocument>,
-    @InjectModel(PayPeriod.name) private periodModel: Model<PayPeriodDocument>,
+    @InjectModel(Staff.name) private readonly staffModel: Model<StaffDocument>,
+    @InjectModel(Schedule.name) private readonly scheduleModel: Model<ScheduleDocument>,
+    @InjectModel(StaffProfile.name) private readonly profileModel: Model<StaffProfileDocument>,
+    @InjectModel(Appointment.name) private readonly apptModel: Model<AppointmentDocument>,
   ) {}
 
-  // ── Members ──────────────────────────────────────────────
-  findAll() {
-    return this.memberModel.find({ isActive: true }).exec();
-  }
-
-  async findOne(id: string) {
-    const m = await this.memberModel.findById(id);
-    if (!m) throw new NotFoundException('Team member not found');
-    return m;
-  }
-
-  async create(dto: Partial<TeamMember>) {
-    if (!dto.name || !dto.role) {
-      throw new BadRequestException('name and role are required');
+  private toPublic(s: StaffDocument, profile?: StaffProfileDocument | null, includePay = false): PublicStaff {
+    const base: PublicStaff = {
+      id: s._id.toString(),
+      name: s.name,
+      email: s.email,
+      phone: s.phone,
+      role: s.role,
+      color: s.color,
+      isActive: s.isActive,
+    };
+    if (profile) {
+      base.level = profile.level;
+      base.capabilities = profile.capabilities;
+      if (includePay) {
+        base.baseRate = profile.baseRate;
+        base.commissionPct = profile.commissionPct;
+      }
     }
-    if (!dto.initials && dto.name) dto.initials = dto.name.trim()[0].toUpperCase();
-    if (!dto.week) dto.week = [null, null, null, null, null, null, null];
-    return this.memberModel.create(dto);
+    return base;
   }
 
-  async update(id: string, dto: Partial<TeamMember>) {
-    const m = await this.memberModel.findByIdAndUpdate(id, dto, { new: true });
-    if (!m) throw new NotFoundException('Team member not found');
-    return m;
+  // ─── Staff accounts ────────────────────────────────────────────────────
+
+  async listStaff(scope: SalonScope, requesterRole: string): Promise<PublicStaff[]> {
+    const includePay = MANAGERS.includes(requesterRole);
+    const staff = await this.staffModel
+      .find({ salonId: scope.salonId })
+      .sort({ role: 1, name: 1 })
+      .exec();
+    const profiles = await this.profileModel.find({ salonId: scope.salonId });
+    const byStaff = new Map(profiles.map((p) => [p.userId.toString(), p]));
+    return staff.map((s) => this.toPublic(s, byStaff.get(s._id.toString()), includePay));
   }
 
-  async remove(id: string) {
-    const m = await this.memberModel.findByIdAndDelete(id);
-    if (!m) throw new NotFoundException('Team member not found');
-    return { deleted: true, id };
-  }
-
-  // ── Temps de travail (rota) ──────────────────────────────
-  async setWeek(id: string, week: WeekDay[]) {
-    if (!Array.isArray(week) || week.length !== 7) {
-      throw new BadRequestException('week must be an array of 7 entries');
-    }
-    week.forEach((d) => this.validateDay(d));
-    return this.update(id, { week });
-  }
-
-  async setDay(id: string, dayIdx: number, value: WeekDay) {
-    if (dayIdx < 0 || dayIdx > 6) throw new BadRequestException('dayIdx must be 0..6');
-    this.validateDay(value);
-    const m = await this.findOne(id);
-    const week = [...(m.week as WeekDay[])];
-    week[dayIdx] = value;
-    m.set('week', week);
-    m.markModified('week');
-    await m.save();
-    return m;
-  }
-
-  private validateDay(d: WeekDay) {
-    if (d === null || d === 'leave') return;
-    if (Array.isArray(d) && d.length === 2) {
-      const [s, e] = d;
-      if (typeof s === 'number' && typeof e === 'number' && e > s) return;
-    }
-    throw new BadRequestException('Invalid day: expected null | "leave" | [start,end] with end > start');
-  }
-
-  // ── Congés / Approvals ───────────────────────────────────
-  listLeaveRequests() {
-    return this.leaveModel.find().sort({ createdAt: -1 }).exec();
-  }
-
-  async decideLeave(id: string, decided: LeaveDecision) {
-    if (![LeaveDecision.APPROVED, LeaveDecision.DECLINED].includes(decided)) {
-      throw new BadRequestException('decided must be "ok" or "no"');
-    }
-    const r = await this.leaveModel.findByIdAndUpdate(id, { decided }, { new: true });
-    if (!r) throw new NotFoundException('Leave request not found');
-    return r;
-  }
-
-  createLeaveRequest(dto: Partial<LeaveRequest>) {
-    return new this.leaveModel(dto).save();
-  }
-
-  // ── Périodes & paie ──────────────────────────────────────
-  listPeriods() {
-    return this.periodModel.find().sort({ createdAt: -1 }).exec();
-  }
-
-  async payslip(memberId: string, periodId: string): Promise<Payslip & { member: string; period: string }> {
-    const member = await this.findOne(memberId);
-    const period = await this.periodModel.findById(periodId);
-    if (!period) throw new NotFoundException('Pay period not found');
-    const slip = computeSlip(
-      { base: member.base, commission: member.commission, tip: member.tip },
-      period.mult,
+  async createStaff(scope: SalonScope, dto: CreateStaffDto): Promise<PublicStaff> {
+    const email = dto.email.toLowerCase().trim();
+    const existing = await this.staffModel.findOne({ email });
+    if (existing) throw new ConflictException('An account with this email already exists.');
+    const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
+    const created = await this.staffModel.create({
+      salonId: scope.salonId,
+      name: dto.name,
+      email,
+      phone: dto.phone,
+      role: dto.role,
+      color: dto.color ?? '#B89968',
+      passwordHash,
+      isActive: true,
+      week: [],
+    });
+    // Crée une rota vide associée (overrides).
+    await this.scheduleModel.updateOne(
+      { salonId: scope.salonId, stylistId: created._id },
+      { $setOnInsert: { weekly: [], overrides: [] } },
+      { upsert: true },
     );
-    return { ...slip, member: member.name, period: period.label };
+    // StaffProfile (surtout pour les stylists).
+    let profile: StaffProfileDocument | null = null;
+    if (['stylist', 'colorist'].includes(dto.role) || dto.level || dto.capabilities || dto.baseRate != null || dto.commissionPct != null) {
+      profile = await this.profileModel.create({
+        salonId: scope.salonId,
+        userId: created._id,
+        level: dto.level ?? 'senior',
+        capabilities: dto.capabilities ?? [],
+        baseRate: dto.baseRate ?? 0,
+        commissionPct: dto.commissionPct ?? 0,
+      });
+    }
+    return this.toPublic(created, profile, true);
+  }
+
+  async updateStaff(scope: SalonScope, id: string, dto: UpdateStaffDto): Promise<PublicStaff> {
+    const s = await this.staffModel.findOne({ _id: id, salonId: scope.salonId });
+    if (!s) throw new NotFoundException('Staff member not found.');
+    if (dto.salonId && dto.salonId !== s.salonId.toString()) {
+      throw new BadRequestException('Un staff ne peut pas changer de salon.');
+    }
+    if (s.role === 'owner' && dto.role) {
+      throw new BadRequestException('The owner role cannot be changed.');
+    }
+    if (dto.name !== undefined) s.name = dto.name;
+    if (dto.phone !== undefined) s.phone = dto.phone;
+    if (dto.role !== undefined && s.role !== 'owner') s.role = dto.role;
+    if (dto.isActive !== undefined) s.isActive = dto.isActive;
+    if (dto.color !== undefined) s.color = dto.color;
+    await s.save();
+
+    const profileFields =
+      dto.level !== undefined ||
+      dto.capabilities !== undefined ||
+      dto.baseRate !== undefined ||
+      dto.commissionPct !== undefined;
+    let profile = await this.profileModel.findOne({ salonId: scope.salonId, userId: s._id });
+    if (profileFields) {
+      const update: Partial<StaffProfile> = {};
+      if (dto.level !== undefined) update.level = dto.level;
+      if (dto.capabilities !== undefined) update.capabilities = dto.capabilities;
+      if (dto.baseRate !== undefined) update.baseRate = dto.baseRate;
+      if (dto.commissionPct !== undefined) update.commissionPct = dto.commissionPct;
+      profile = await this.profileModel.findOneAndUpdate(
+        { salonId: scope.salonId, userId: s._id },
+        { $set: update, $setOnInsert: { salonId: scope.salonId, userId: s._id } },
+        { upsert: true, new: true },
+      );
+    }
+    return this.toPublic(s, profile, true);
+  }
+
+  async deactivateStaff(scope: SalonScope, id: string): Promise<PublicStaff> {
+    const s = await this.staffModel.findOne({ _id: id, salonId: scope.salonId });
+    if (!s) throw new NotFoundException('Staff member not found.');
+    if (s.role === 'owner') throw new BadRequestException('The owner account cannot be deactivated.');
+    s.isActive = false;
+    await s.save();
+    const profile = await this.profileModel.findOne({ salonId: scope.salonId, userId: s._id });
+    return this.toPublic(s, profile, true);
+  }
+
+  // ─── Standing (#9 — le staff courant UNIQUEMENT) ──────────────────────
+
+  async myStanding(scope: SalonScope, user: AuthUser): Promise<StylistStanding> {
+    const me = await this.staffModel.findOne({ _id: user.sub, salonId: scope.salonId });
+    if (!me) throw new NotFoundException('Account not found.');
+    const profile = await this.profileModel.findOne({ salonId: scope.salonId, userId: me._id });
+    const commissionPct = profile?.commissionPct ?? 0;
+
+    const now = new Date();
+    const completed = await this.apptModel.find({
+      salonId: scope.salonId,
+      stylistId: me._id,
+      status: 'completed',
+    });
+    const upcoming = await this.apptModel.countDocuments({
+      salonId: scope.salonId,
+      stylistId: me._id,
+      status: { $in: ['booked', 'confirmed'] },
+      start: { $gte: now },
+    });
+    const grossServices = completed.reduce((a, c) => a + (c.price ?? 0), 0);
+    const estimatedCommission = Math.round((grossServices * commissionPct) / 100);
+
+    // Shifts à venir (7 prochains jours) — lus depuis Staff.week + Schedule.overrides.
+    const upcomingShifts: { date: string; start: string; end: string }[] = [];
+    const schedule = await this.scheduleModel.findOne({ salonId: scope.salonId, stylistId: me._id });
+    const weekly = me.week ?? [];
+    const overrides = schedule?.overrides ?? [];
+    for (let i = 0; i < 7; i += 1) {
+      const d = new Date(now.getTime() + i * 24 * 60 * MS_PER_MIN);
+      const date = d.toISOString().slice(0, 10);
+      const override = overrides.find((o) => o.date === date);
+      if (override && (override.type === 'off' || override.type === 'leave')) continue;
+      const base = weekly.find((w) => w.day === d.getUTCDay());
+      if (override && override.type === 'custom' && override.start && override.end) {
+        upcomingShifts.push({ date, start: override.start, end: override.end });
+      } else if (base) {
+        upcomingShifts.push({ date, start: base.start, end: base.end });
+      }
+    }
+
+    return {
+      stylistId: me._id.toString(),
+      name: me.name,
+      level: profile?.level ?? 'senior',
+      baseRate: profile?.baseRate ?? 0,
+      commissionPct,
+      upcomingShifts,
+      completedCount: completed.length,
+      upcomingCount: upcoming,
+      grossServices,
+      estimatedCommission,
+      tips: 0,
+    };
   }
 }

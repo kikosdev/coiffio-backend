@@ -1,81 +1,110 @@
-import { Controller, Post, Get, Patch, Body, Param, UseGuards, Request } from '@nestjs/common';
-import { AuthService } from './auth.service';
-import { JwtAuthGuard } from '../common/jwt-auth.guard';
-import { RolesGuard } from '../common/roles.guard';
-import { Roles } from '../common/roles.decorator';
-import { UserRole, StaffJob } from '../schemas/user.schema';
-import { JwtPayload } from './jwt.strategy';
+import {
+  Body,
+  Controller,
+  Get,
+  Patch,
+  Post,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
+import { Response } from 'express';
+import { AuthService, PublicUser } from './auth.service';
+import {
+  ChangePasswordDto,
+  LoginDto,
+  PasswordResetConfirmDto,
+  PasswordResetRequestDto,
+  RegisterDto,
+  UpdateMeDto,
+} from './dto/auth.dto';
+import { JwtGuard } from '../common/guards/jwt.guard';
+import { CurrentUser, AuthUser } from '../common/decorators/current-user.decorator';
 
-interface AuthRequest {
-  user: JwtPayload;
-}
+const COOKIE_NAME = 'access_token';
 
+/** Toutes les routes renvoient l'enveloppe { data, message, statusCode } (convention #1). */
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(private readonly auth: AuthService) {}
 
-  @Post('register')
-  register(@Body() body: { firstName: string; lastName: string; email: string; password: string; phone?: string }) {
-    return this.authService.registerClient(body);
-  }
-
-  @Post('register/client')
-  registerClient(@Body() body: { firstName: string; lastName: string; email: string; password: string; phone?: string }) {
-    return this.authService.registerClient(body);
+  private setAuthCookie(res: Response, token: string): void {
+    const isProd = process.env.NODE_ENV === 'production';
+    res.cookie(COOKIE_NAME, token, {
+      httpOnly: true,
+      sameSite: isProd ? 'none' : 'lax',
+      secure: isProd,
+      maxAge: 1000 * 60 * 60 * 24 * 7, // 7 jours
+      path: '/',
+    });
   }
 
   @Post('login')
-  login(@Body() body: { email: string; password: string }) {
-    return this.authService.login(body.email, body.password);
+  async login(
+    @Body() dto: LoginDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<{ data: { token: string; user: PublicUser }; message: string }> {
+    const result = await this.auth.login(dto);
+    this.setAuthCookie(res, result.token);
+    return { data: result, message: 'Signed in successfully.' };
   }
 
-  @UseGuards(JwtAuthGuard)
+  @Post('register')
+  async register(
+    @Body() dto: RegisterDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<{ data: { token: string; user: PublicUser }; message: string }> {
+    const result = await this.auth.register(dto);
+    this.setAuthCookie(res, result.token);
+    return { data: result, message: 'Account created successfully.' };
+  }
+
+  @Post('password-reset/request')
+  async requestReset(
+    @Body() dto: PasswordResetRequestDto,
+  ): Promise<{ data: { sent: boolean }; message: string }> {
+    const data = await this.auth.requestPasswordReset(dto);
+    return { data, message: 'If the account exists, a reset link has been sent.' };
+  }
+
+  @Post('password-reset/confirm')
+  async confirmReset(
+    @Body() dto: PasswordResetConfirmDto,
+  ): Promise<{ data: { reset: boolean }; message: string }> {
+    const data = await this.auth.confirmPasswordReset(dto);
+    return { data, message: 'Password updated. You can now sign in.' };
+  }
+
   @Get('me')
-  getMe(@Request() req: AuthRequest) {
-    return this.authService.getMe(req.user.sub);
+  @UseGuards(JwtGuard)
+  async me(@CurrentUser() user: AuthUser): Promise<{ data: PublicUser; message: string }> {
+    const data = await this.auth.me(user);
+    return { data, message: 'OK' };
   }
 
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.OWNER, UserRole.SUPERVISOR)
-  @Post('staff')
-  createStaff(
-    @Body() body: {
-      firstName: string;
-      lastName: string;
-      email: string;
-      password: string;
-      phone?: string;
-      job?: StaffJob;
-      staffId?: string;
-    },
-  ) {
-    return this.authService.createStaff(body);
+  @Patch('me')
+  @UseGuards(JwtGuard)
+  async updateMe(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: UpdateMeDto,
+  ): Promise<{ data: PublicUser; message: string }> {
+    const data = await this.auth.updateMe(user, dto);
+    return { data, message: 'Profile updated.' };
   }
 
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.OWNER)
-  @Patch('users/:id/role')
-  updateRole(
-    @Param('id') id: string,
-    @Body() body: { role: UserRole },
-    @Request() req: AuthRequest,
-  ) {
-    return this.authService.updateRole(id, body.role, req.user.role);
+  @Patch('me/password')
+  @UseGuards(JwtGuard)
+  async changePassword(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: ChangePasswordDto,
+  ): Promise<{ data: { ok: boolean }; message: string }> {
+    await this.auth.changePassword(user, dto);
+    return { data: { ok: true }, message: 'Mot de passe mis à jour.' };
   }
 
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.OWNER, UserRole.SUPERVISOR)
-  @Patch('users/:id/deactivate')
-  deactivate(@Param('id') id: string) {
-    return this.authService.deactivate(id);
-  }
-
-  @UseGuards(JwtAuthGuard)
-  @Post('change-password')
-  changePassword(
-    @Request() req: AuthRequest,
-    @Body() body: { currentPassword: string; newPassword: string },
-  ) {
-    return this.authService.changePassword(req.user.sub, body.currentPassword, body.newPassword);
+  @Post('logout')
+  @UseGuards(JwtGuard)
+  logout(@Res({ passthrough: true }) res: Response): { data: { ok: boolean }; message: string } {
+    res.clearCookie(COOKIE_NAME, { path: '/' });
+    return { data: { ok: true }, message: 'Signed out.' };
   }
 }

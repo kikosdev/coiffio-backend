@@ -1,12 +1,13 @@
 import { Controller, Get } from '@nestjs/common';
-import { AppService } from './app.service';
 
 @Controller()
 export class AppController {
-  constructor(private readonly appService: AppService) {}
-
-  @Get()
-  getHello(): string {
-    return this.appService.getHello();
+  /** Sanity route — démontre l'enveloppe { data, message, statusCode }. */
+  @Get('health')
+  health(): { data: { status: string; service: string }; message: string } {
+    return {
+      data: { status: 'ok', service: 'salon-backend' },
+      message: 'Service healthy',
+    };
   }
 }

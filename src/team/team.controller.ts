@@ -1,82 +1,56 @@
-import { Controller, Get, Post, Patch, Put, Delete, Param, Body, Query, UseGuards } from '@nestjs/common';
-import { AuthGuard } from '@nestjs/passport';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import { Request } from 'express';
 import { TeamService } from './team.service';
-import { TeamMember } from '../schemas/team-member.schema';
-import { LeaveRequest, LeaveDecision } from '../schemas/leave-request.schema';
+import { CreateStaffDto, UpdateStaffDto } from './dto/team.dto';
+import { JwtGuard } from '../common/guards/jwt.guard';
+import { RolesGuard } from '../common/guards/roles.guard';
+import { Roles } from '../common/decorators/roles.decorator';
+import { getSalonScope } from '../common/scope/salon-scope';
+import { CurrentUser, AuthUser } from '../common/decorators/current-user.decorator';
 
-type WeekDay = number[] | 'leave' | null;
-
+/**
+ * Team (Sprint 3). Matrice : roster = owner·manager·stylist (besoin opérationnel — la paie
+ * n'est jamais jointe pour un stylist, #9) ; créer/supprimer un compte = owner only ;
+ * éditer profil/level/capabilities = owner·manager. `me/standing` = chiffres du stylist
+ * courant UNIQUEMENT (#9). Enveloppe + scope partout.
+ */
 @Controller('team')
+@UseGuards(JwtGuard, RolesGuard)
+@Roles('owner', 'manager', 'stylist')
 export class TeamController {
-  constructor(private teamService: TeamService) {}
+  constructor(private readonly team: TeamService) {}
 
-  // ── Members ──
   @Get()
-  findAll() {
-    return this.teamService.findAll();
+  async list(@Req() req: Request, @CurrentUser('role') role: string) {
+    const data = await this.team.listStaff(getSalonScope(req), role);
+    return { data, message: 'OK' };
   }
 
-  @Get('leave-requests')
-  listLeaves() {
-    return this.teamService.listLeaveRequests();
+  /** #9 — paie/commission/tips du stylist courant uniquement (l'identité vient du JWT). */
+  @Get('me/standing')
+  async standing(@Req() req: Request, @CurrentUser() user: AuthUser) {
+    const data = await this.team.myStanding(getSalonScope(req), user);
+    return { data, message: 'OK' };
   }
 
-  @Get('periods')
-  listPeriods() {
-    return this.teamService.listPeriods();
-  }
-
-  @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.teamService.findOne(id);
-  }
-
-  @Get(':id/payslip')
-  payslip(@Param('id') id: string, @Query('period') period: string) {
-    return this.teamService.payslip(id, period);
-  }
-
-  @UseGuards(AuthGuard('jwt'))
   @Post()
-  create(@Body() body: Partial<TeamMember>) {
-    return this.teamService.create(body);
+  @Roles('owner')
+  async create(@Req() req: Request, @Body() dto: CreateStaffDto) {
+    const data = await this.team.createStaff(getSalonScope(req), dto);
+    return { data, message: 'Staff account created.' };
   }
 
-  @UseGuards(AuthGuard('jwt'))
   @Patch(':id')
-  update(@Param('id') id: string, @Body() body: Partial<TeamMember>) {
-    return this.teamService.update(id, body);
+  @Roles('owner', 'manager')
+  async update(@Req() req: Request, @Param('id') id: string, @Body() dto: UpdateStaffDto) {
+    const data = await this.team.updateStaff(getSalonScope(req), id, dto);
+    return { data, message: 'Staff account updated.' };
   }
 
-  @UseGuards(AuthGuard('jwt'))
   @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.teamService.remove(id);
-  }
-
-  // ── Temps de travail (rota) ──
-  @UseGuards(AuthGuard('jwt'))
-  @Put(':id/week')
-  setWeek(@Param('id') id: string, @Body('week') week: WeekDay[]) {
-    return this.teamService.setWeek(id, week);
-  }
-
-  @UseGuards(AuthGuard('jwt'))
-  @Patch(':id/week/:day')
-  setDay(@Param('id') id: string, @Param('day') day: string, @Body('value') value: WeekDay) {
-    return this.teamService.setDay(id, parseInt(day, 10), value);
-  }
-
-  // ── Congés ──
-  @UseGuards(AuthGuard('jwt'))
-  @Post('leave-requests')
-  createLeave(@Body() body: Partial<LeaveRequest>) {
-    return this.teamService.createLeaveRequest(body);
-  }
-
-  @UseGuards(AuthGuard('jwt'))
-  @Patch('leave-requests/:id/decision')
-  decideLeave(@Param('id') id: string, @Body('decided') decided: LeaveDecision) {
-    return this.teamService.decideLeave(id, decided);
+  @Roles('owner')
+  async deactivate(@Req() req: Request, @Param('id') id: string) {
+    const data = await this.team.deactivateStaff(getSalonScope(req), id);
+    return { data, message: 'Staff account deactivated.' };
   }
 }

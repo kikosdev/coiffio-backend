@@ -1,104 +1,73 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
-import { Cron, CronExpression } from '@nestjs/schedule';
-import { Notification, NotificationDocument, NotifType } from './notification.schema';
+import { Notification, NotificationDocument } from './schemas/notification.schema';
 import { NotificationsGateway } from './notifications.gateway';
-import { User, UserDocument, UserRole } from '../schemas/user.schema';
-import { Appointment, AppointmentDocument, AppointmentStatus } from '../schemas/appointment.schema';
+import { SalonScope } from '../common/scope/salon-scope';
+import { AuthUser } from '../common/decorators/current-user.decorator';
+
+export interface DispatchInput {
+  salonId: Types.ObjectId | string;
+  userId?: Types.ObjectId | string;
+  role?: string;
+  type: string;
+  payload?: Record<string, unknown>;
+}
 
 @Injectable()
 export class NotificationsService {
   constructor(
-    @InjectModel(Notification.name) private model: Model<NotificationDocument>,
-    @InjectModel(User.name)         private userModel: Model<UserDocument>,
-    @InjectModel(Appointment.name)  private apptModel: Model<AppointmentDocument>,
+    @InjectModel(Notification.name) private readonly model: Model<NotificationDocument>,
     private readonly gateway: NotificationsGateway,
   ) {}
 
-  async push(
-    userId: string | Types.ObjectId,
-    type: NotifType,
-    title: string,
-    body: string,
-    data?: Record<string, unknown>,
-  ) {
-    const notif = await this.model.create({ userId, type, title, body, data });
-    this.gateway.emitToUser(userId.toString(), notif.toObject());
+  /**
+   * Persist-then-emit (#7) : crée la Notification en Mongo PUIS émet. Jamais d'emit-only.
+   * Scoping (#4) : un event userId va à `user:{id}` ; un event role va à `role:{role}`.
+   */
+  async dispatch(input: DispatchInput): Promise<NotificationDocument> {
+    const notif = await this.model.create({
+      salonId: new Types.ObjectId(input.salonId),
+      userId: input.userId ? new Types.ObjectId(input.userId) : undefined,
+      role: input.role,
+      type: input.type,
+      payload: input.payload ?? {},
+      read: false,
+      date: new Date(),
+    });
+    if (input.userId) this.gateway.emitToRoom(`user:${input.userId.toString()}`, input.type, notif);
+    if (input.role) this.gateway.emitToRoom(`role:${input.role}`, input.type, notif);
     return notif;
   }
 
-  async pushToManagers(
-    type: NotifType,
-    title: string,
-    body: string,
-    data?: Record<string, unknown>,
-  ) {
-    const managers = await this.userModel
-      .find({ role: { $in: [UserRole.OWNER, UserRole.SUPERVISOR] }, isActive: true })
-      .select('_id')
-      .lean();
-
-    await Promise.all(
-      managers.map(m => this.push(m._id.toString(), type, title, body, data)),
-    );
-
-    this.gateway.emitToRole(UserRole.OWNER, { type, title, body, data });
-    this.gateway.emitToRole(UserRole.SUPERVISOR, { type, title, body, data });
-  }
-
-  async findMine(userId: string, page = 0, limit = 20) {
-    const skip = page * limit;
-    const [items, total] = await Promise.all([
-      this.model.find({ userId }).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
-      this.model.countDocuments({ userId }),
-    ]);
-    return { items, total, page, limit };
-  }
-
-  async unreadCount(userId: string) {
-    return this.model.countDocuments({ userId, isRead: false });
-  }
-
-  async markRead(id: string) {
-    return this.model.findByIdAndUpdate(id, { isRead: true }, { new: true });
-  }
-
-  async markAllRead(userId: string) {
-    return this.model.updateMany({ userId, isRead: false }, { isRead: true });
-  }
-
-  async remove(id: string) {
-    return this.model.findByIdAndDelete(id);
-  }
-
-  @Cron(CronExpression.EVERY_DAY_AT_8AM)
-  async sendAppointmentReminders() {
-    const tomorrow = new Date();
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const start = new Date(tomorrow); start.setHours(0, 0, 0, 0);
-    const end   = new Date(tomorrow); end.setHours(23, 59, 59, 999);
-
-    const appts = await this.apptModel
+  /** Liste scopée : userId == soi OU role match (#4). */
+  async list(scope: SalonScope, user: AuthUser): Promise<NotificationDocument[]> {
+    return this.model
       .find({
-        startsAt: { $gte: start, $lte: end },
-        status: { $in: [AppointmentStatus.CONFIRMED, AppointmentStatus.PENDING] },
-        clientId: { $ne: null },
+        salonId: scope.salonId,
+        $or: [{ userId: new Types.ObjectId(user.sub) }, { role: user.role }],
       })
-      .populate('serviceIds')
-      .lean();
+      .sort({ date: -1 })
+      .limit(100);
+  }
 
-    await Promise.all(
-      appts.map(appt => {
-        if (!appt.clientId) return Promise.resolve();
-        return this.push(
-          appt.clientId.toString(),
-          NotifType.APPOINTMENT_REMINDER,
-          'Reminder — your appointment is tomorrow',
-          `Your visit at Maison Haire is scheduled for tomorrow at ${new Date(appt.startsAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}.`,
-          { appointmentId: appt._id?.toString() },
-        );
-      }),
+  async markRead(scope: SalonScope, user: AuthUser, id: string): Promise<NotificationDocument> {
+    const n = await this.model.findOne({
+      _id: id,
+      salonId: scope.salonId,
+      $or: [{ userId: new Types.ObjectId(user.sub) }, { role: user.role }],
+    });
+    if (!n) throw new NotFoundException('Notification not found.');
+    n.read = true;
+    await n.save();
+    return n;
+  }
+
+  async readAll(scope: SalonScope, user: AuthUser): Promise<{ updated: number }> {
+    const res = await this.model.updateMany(
+      { salonId: scope.salonId, read: false, $or: [{ userId: new Types.ObjectId(user.sub) }, { role: user.role }] },
+      { $set: { read: true } },
     );
+    return { updated: res.modifiedCount ?? 0 };
   }
 }

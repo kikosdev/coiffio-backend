@@ -1,316 +1,280 @@
-import {
-  BadRequestException,
-  ConflictException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
-import { InjectModel, InjectConnection } from '@nestjs/mongoose';
-import { Model, Connection, Types } from 'mongoose';
-import { Order, OrderDocument, OrderStatus, PaymentStatus, FulfillmentType } from './schemas/order.schema';
-import { Product, ProductDocument } from '../schemas/product.schema';
-import { CreateOrderDto } from './dto/create-order.dto';
-import { OrderFiltersDto } from './dto/order-filters.dto';
-import { assertTransition, DECREMENTED_STATUSES } from './orders.state-machine';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { InjectConnection, InjectModel } from '@nestjs/mongoose';
+import { ClientSession, Connection, FilterQuery, Model, Types } from 'mongoose';
+import { randomBytes } from 'crypto';
+import { Cart, CartDocument } from './schemas/cart.schema';
+import { Order, OrderDocument, OrderStatus } from './schemas/order.schema';
+import { Product, ProductDocument } from '../stock/schemas/product.schema';
+import { StockMove, StockMoveDocument } from '../stock/schemas/stock-move.schema';
+import { Sale, SaleDocument } from '../finance/schemas/sale.schema';
+import { Client, ClientDocument } from '../clients/schemas/client.schema';
+import { CheckoutDto } from './dto/orders.dto';
+import { SalonScope } from '../common/scope/salon-scope';
 import { NotificationsService } from '../notifications/notifications.service';
-import { NotifType } from '../notifications/notification.schema';
+import { SOCKET_EVENTS } from '../common/socket-events';
 
-interface AuthUser {
-  sub: string;
-  email: string;
-  role: string;
+const CART_TTL_DAYS = 7;
+const TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
+  pending: ['confirmed', 'cancelled'],
+  confirmed: ['ready', 'cancelled'],
+  ready: ['picked_up', 'cancelled'],
+  picked_up: [],
+  cancelled: [],
+};
+
+export interface CartCtx {
+  clientId?: string;
+  cartToken?: string;
 }
 
 @Injectable()
 export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
+
   constructor(
-    @InjectModel(Order.name)   private orderModel: Model<OrderDocument>,
-    @InjectModel(Product.name) private productModel: Model<ProductDocument>,
-    @InjectConnection()        private connection: Connection,
+    @InjectModel(Cart.name) private readonly cartModel: Model<CartDocument>,
+    @InjectModel(Order.name) private readonly orderModel: Model<OrderDocument>,
+    @InjectModel(Product.name) private readonly productModel: Model<ProductDocument>,
+    @InjectModel(StockMove.name) private readonly moveModel: Model<StockMoveDocument>,
+    @InjectModel(Sale.name) private readonly saleModel: Model<SaleDocument>,
+    @InjectModel(Client.name) private readonly clientModel: Model<ClientDocument>,
+    @InjectConnection() private readonly connection: Connection,
     private readonly notifications: NotificationsService,
   ) {}
 
-  // ─── Create ────────────────────────────────────────────────────────────────
+  async shopProducts(scope: SalonScope): Promise<ProductDocument[]> {
+    return this.productModel.find({ salonId: scope.salonId, active: true }).sort({ category: 1, name: 1 });
+  }
 
-  async create(dto: CreateOrderDto, user?: AuthUser): Promise<Order> {
-    if (!user && !dto.guest) {
-      throw new BadRequestException('Guest info required for unauthenticated orders');
+  private expiry(): Date {
+    return new Date(Date.now() + CART_TTL_DAYS * 24 * 60 * 60 * 1000);
+  }
+
+  private cartFilter(scope: SalonScope, ctx: CartCtx): FilterQuery<CartDocument> | null {
+    if (ctx.clientId) return { salonId: scope.salonId, clientId: new Types.ObjectId(ctx.clientId) };
+    if (ctx.cartToken) return { salonId: scope.salonId, cartToken: ctx.cartToken };
+    return null;
+  }
+
+  /** Renvoie le panier courant + un nouveau cartToken si un panier invité vient d'être créé. */
+  async getCart(scope: SalonScope, ctx: CartCtx, create = false): Promise<{ cart: CartDocument | null; newToken?: string }> {
+    const filter = this.cartFilter(scope, ctx);
+    let cart = filter ? await this.cartModel.findOne(filter) : null;
+    if (!cart && create) {
+      if (ctx.clientId) {
+        cart = await this.cartModel.create({ salonId: scope.salonId, clientId: new Types.ObjectId(ctx.clientId), items: [], expiresAt: this.expiry() });
+        return { cart };
+      }
+      const newToken = randomBytes(18).toString('hex');
+      cart = await this.cartModel.create({ salonId: scope.salonId, cartToken: newToken, items: [], expiresAt: this.expiry() });
+      return { cart, newToken };
     }
+    return { cart };
+  }
 
-    const productIds = dto.items.map(i => new Types.ObjectId(i.productId));
-    const products = await this.productModel
-      .find({ _id: { $in: productIds }, isPublic: true, isActive: true })
-      .lean();
+  async addItem(scope: SalonScope, ctx: CartCtx, productId: string, qty: number): Promise<{ cart: CartDocument; newToken?: string }> {
+    const product = await this.productModel.findOne({ _id: productId, salonId: scope.salonId, active: true });
+    if (!product) throw new BadRequestException('Product not found.');
+    const { cart, newToken } = await this.getCart(scope, ctx, true);
+    const line = cart!.items.find((i) => i.productId.toString() === productId);
+    if (line) line.qty += qty;
+    else cart!.items.push({ productId: product._id as Types.ObjectId, qty, unitPrice: product.price });
+    cart!.expiresAt = this.expiry();
+    await cart!.save();
+    return { cart: cart!, newToken };
+  }
 
-    const items = dto.items.map(i => {
-      const p = products.find(x => x._id.toString() === i.productId);
-      if (!p) throw new BadRequestException(`Product ${i.productId} not available`);
-      if (p.stockQuantity < i.quantity)
-        throw new ConflictException(`Stock insuffisant pour ${p.name}`);
-      return {
-        productId:   new Types.ObjectId(i.productId),
-        productName: p.name,
-        unitPrice:   p.priceEur,
-        quantity:    i.quantity,
-        lineTotal:   p.priceEur * i.quantity,
-      };
-    });
+  async updateItemQty(scope: SalonScope, ctx: CartCtx, productId: string, qty: number): Promise<CartDocument> {
+    if (qty === 0) return this.removeItem(scope, ctx, productId);
+    const { cart } = await this.getCart(scope, ctx);
+    if (!cart) throw new NotFoundException('Cart not found.');
+    const line = cart.items.find((i) => i.productId.toString() === productId);
+    if (!line) throw new NotFoundException('Item not in cart.');
+    line.qty = qty;
+    await cart.save();
+    return cart;
+  }
 
-    const subtotal    = items.reduce((s, it) => s + it.lineTotal, 0);
-    const shippingFee = dto.fulfillmentType === FulfillmentType.DELIVERY ? 5 : 0;
-    const totalAmount = subtotal + shippingFee;
-    const orderNumber = await this.generateOrderNumber();
+  async removeItem(scope: SalonScope, ctx: CartCtx, productId: string): Promise<CartDocument> {
+    const { cart } = await this.getCart(scope, ctx);
+    if (!cart) throw new NotFoundException('Cart not found.');
+    cart.items = cart.items.filter((i) => i.productId.toString() !== productId);
+    await cart.save();
+    return cart;
+  }
 
-    const order = await this.orderModel.create({
-      orderNumber,
-      userId:          user ? new Types.ObjectId(user.sub) : undefined,
-      guest:           !user ? dto.guest : undefined,
-      items,
-      subtotal,
-      shippingFee,
-      totalAmount,
-      paymentMethod:   dto.paymentMethod,
-      fulfillmentType: dto.fulfillmentType,
-      shippingAddress: dto.shippingAddress,
-      notes:           dto.notes,
-      statusHistory:   [{ status: OrderStatus.PENDING, at: new Date() }],
-    });
+  /** Fusionne le panier invité (cartToken) dans le panier client au login (#10). */
+  async merge(scope: SalonScope, clientId: string, cartToken?: string): Promise<CartDocument> {
+    const { cart: clientCart } = await this.getCart(scope, { clientId }, true);
+    if (!cartToken) return clientCart!;
+    const guest = await this.cartModel.findOne({ salonId: scope.salonId, cartToken });
+    if (guest) {
+      for (const gl of guest.items) {
+        const line = clientCart!.items.find((i) => i.productId.toString() === gl.productId.toString());
+        if (line) line.qty += gl.qty;
+        else clientCart!.items.push(gl);
+      }
+      await clientCart!.save();
+      await guest.deleteOne();
+    }
+    return clientCart!;
+  }
 
-    await this.notifications.pushToManagers(
-      NotifType.ORDER_CREATED,
-      'Nouvelle commande',
-      `${orderNumber} · ${totalAmount.toFixed(2)} €`,
-      { orderId: order._id?.toString() },
-    );
+  // ─── Checkout pickup-only (#5) + décrément transactionnel (#6) ────────────────
 
-    if (user) {
-      await this.notifications.push(
-        user.sub,
-        NotifType.ORDER_CREATED,
-        'Commande reçue',
-        `Votre commande ${orderNumber} est en attente de validation.`,
-        { orderId: order._id?.toString() },
+  async checkout(scope: SalonScope, ctx: CartCtx, dto: CheckoutDto): Promise<OrderDocument> {
+    const { cart } = await this.getCart(scope, ctx);
+    if (!cart || cart.items.length === 0) throw new BadRequestException('Cart is empty.');
+
+    const products = await this.productModel.find({ salonId: scope.salonId, _id: { $in: cart.items.map((i) => i.productId) } });
+    const nameOf = new Map(products.map((p) => [p._id.toString(), p.name]));
+    const lines = cart.items.map((i) => ({
+      productId: i.productId,
+      name: nameOf.get(i.productId.toString()) ?? '',
+      qty: i.qty,
+      unitPrice: i.unitPrice,
+    }));
+    const deliveryFee = dto.delivery ? 7 : 0;
+    const total = lines.reduce((a, l) => a + l.qty * l.unitPrice, 0) + deliveryFee;
+
+    const clientId = await this.resolveClient(scope, ctx, dto);
+    const trackToken = randomBytes(24).toString('hex');
+
+    const place = async (session: ClientSession | null): Promise<OrderDocument> => {
+      for (const l of lines) {
+        const res = await this.productModel.updateOne(
+          { _id: l.productId, salonId: scope.salonId, stock: { $gte: l.qty } },
+          { $inc: { stock: -l.qty } },
+          session ? { session } : {},
+        );
+        if (res.modifiedCount === 0) throw new ConflictException(`Rupture de stock : ${l.name}.`);
+        await this.moveModel.create(
+          [{ salonId: scope.salonId, productId: l.productId, type: 'out', qty: l.qty, date: new Date(), note: 'Order' }],
+          session ? { session } : {},
+        );
+        const prod = await this.productModel.findById(l.productId).session(session ?? null);
+        if (prod && prod.stock <= prod.lowStockAt) {
+          void this.notifications.dispatch({
+            salonId: scope.salonId,
+            role: 'owner',
+            type: SOCKET_EVENTS.STOCK_LOW,
+            payload: { productId: prod._id.toString(), name: prod.name, stock: prod.stock },
+          });
+        }
+      }
+      const docs = await this.orderModel.create(
+        [
+          {
+            salonId: scope.salonId,
+            clientId,
+            cartToken: ctx.cartToken,
+            items: lines,
+            delivery: dto.delivery ?? false,
+            deliveryFee,
+            total,
+            status: 'pending',
+            pickupAt: dto.pickupAt ? new Date(dto.pickupAt) : undefined,
+            trackToken,
+            date: new Date(),
+          },
+        ],
+        session ? { session } : {},
       );
-    }
+      return docs[0];
+    };
 
-    return order;
-  }
-
-  // ─── List ──────────────────────────────────────────────────────────────────
-
-  async findAll(filters: OrderFiltersDto) {
-    const query: Record<string, unknown> = {};
-    if (filters.status) query.status = filters.status;
-    if (filters.from || filters.to) {
-      query.createdAt = {};
-      if (filters.from) (query.createdAt as Record<string, unknown>)['$gte'] = new Date(filters.from);
-      if (filters.to)   (query.createdAt as Record<string, unknown>)['$lte'] = new Date(filters.to);
-    }
-    if (filters.search) {
-      query['$or'] = [
-        { orderNumber: { $regex: filters.search, $options: 'i' } },
-        { 'guest.fullName': { $regex: filters.search, $options: 'i' } },
-        { 'guest.email': { $regex: filters.search, $options: 'i' } },
-      ];
-    }
-
-    const page  = filters.page  ?? 0;
-    const limit = filters.limit ?? 20;
-    const skip  = page * limit;
-
-    const [items, total] = await Promise.all([
-      this.orderModel.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
-      this.orderModel.countDocuments(query),
-    ]);
-
-    return { items, total, page, limit };
-  }
-
-  async findOne(id: string): Promise<OrderDocument> {
-    const order = await this.orderModel.findById(id);
-    if (!order) throw new NotFoundException('Order not found');
-    return order;
-  }
-
-  async findByOrderNumber(orderNumber: string, email?: string): Promise<OrderDocument> {
-    const order = await this.orderModel.findOne({ orderNumber });
-    if (!order) throw new NotFoundException('Order not found');
-    if (email) {
-      const guestEmail  = (order.guest as { email?: string } | undefined)?.email;
-      const matchesGuest = guestEmail?.toLowerCase() === email.toLowerCase();
-      if (!matchesGuest) throw new NotFoundException('Order not found');
-    }
-    return order;
-  }
-
-  async findByUser(userId: string) {
-    return this.orderModel.find({ userId: new Types.ObjectId(userId) }).sort({ createdAt: -1 }).lean();
-  }
-
-  // ─── Status transitions ────────────────────────────────────────────────────
-
-  async updateStatus(id: string, next: OrderStatus, user: AuthUser, note?: string) {
+    let order: OrderDocument;
     const session = await this.connection.startSession();
     try {
-      return await session.withTransaction(async () => {
-        const order = await this.orderModel.findById(id).session(session);
-        if (!order) throw new NotFoundException('Order not found');
-
-        assertTransition(order.status, next);
-
-        // Decrement stock on confirmation
-        if (next === OrderStatus.CONFIRMED) {
-          for (const it of order.items) {
-            const res = await this.productModel.updateOne(
-              { _id: it.productId, stockQuantity: { $gte: it.quantity } },
-              { $inc: { stockQuantity: -it.quantity, salesCount: it.quantity } },
-              { session },
-            );
-            if (res.modifiedCount === 0) {
-              throw new ConflictException(`Stock épuisé pour ${it.productName}`);
-            }
-          }
-        }
-
-        // Return stock on cancellation/refund if already decremented
-        const wasDecremented = DECREMENTED_STATUSES.includes(order.status);
-        if ((next === OrderStatus.CANCELLED || next === OrderStatus.REFUNDED) && wasDecremented) {
-          for (const it of order.items) {
-            await this.productModel.updateOne(
-              { _id: it.productId },
-              { $inc: { stockQuantity: it.quantity, salesCount: -it.quantity } },
-              { session },
-            );
-          }
-        }
-
-        // Auto-mark as paid on delivery (COD)
-        if (next === OrderStatus.DELIVERED) {
-          order.paymentStatus = PaymentStatus.PAID;
-        }
-
-        order.status = next;
-        order.statusHistory.push({
-          status:    next,
-          at:        new Date(),
-          byUserId:  new Types.ObjectId(user.sub),
-          note,
-        });
-        await order.save({ session });
-
-        await this.notifyStatusChange(order, next);
-        return order;
+      let created: OrderDocument | null = null;
+      await session.withTransaction(async () => {
+        created = await place(session);
       });
+      order = created!;
+    } catch (err) {
+      if (err instanceof ConflictException) throw err;
+      if (this.isTxnUnsupported(err)) {
+        this.logger.warn('Transactions unsupported — fallback checkout.');
+        order = await place(null);
+      } else {
+        throw err;
+      }
     } finally {
       await session.endSession();
     }
-  }
 
-  async cancelByUser(id: string, userId: string) {
-    const order = await this.orderModel.findOne({ _id: id, userId: new Types.ObjectId(userId) });
-    if (!order) throw new NotFoundException('Order not found');
-    if (![OrderStatus.PENDING, OrderStatus.CONFIRMED].includes(order.status)) {
-      throw new BadRequestException('Cette commande ne peut plus être annulée');
-    }
-    return this.updateStatus(id, OrderStatus.CANCELLED, { sub: userId, email: '', role: 'client' });
-  }
-
-  async updatePaymentStatus(id: string, paymentStatus: string) {
-    const order = await this.orderModel.findByIdAndUpdate(
-      id,
-      { paymentStatus },
-      { new: true },
-    );
-    if (!order) throw new NotFoundException('Order not found');
+    cart.items = [];
+    await cart.save();
+    void this.notifications.dispatch({
+      salonId: scope.salonId,
+      role: 'owner',
+      type: SOCKET_EVENTS.ORDER_CREATED,
+      payload: { orderId: order._id.toString(), total: order.total },
+    });
     return order;
   }
 
-  async updateNotes(id: string, internalNotes: string) {
-    const order = await this.orderModel.findByIdAndUpdate(
-      id,
-      { internalNotes },
-      { new: true },
-    );
-    if (!order) throw new NotFoundException('Order not found');
+  private async resolveClient(scope: SalonScope, ctx: CartCtx, dto: CheckoutDto): Promise<Types.ObjectId | undefined> {
+    if (ctx.clientId) return new Types.ObjectId(ctx.clientId);
+    // Invité : merge-on-phone (#10).
+    const existing = await this.clientModel.findOne({ salonId: scope.salonId, phone: dto.phone });
+    if (existing) {
+      if (dto.email && !existing.email) {
+        existing.email = dto.email;
+        await existing.save();
+      }
+      return existing._id as Types.ObjectId;
+    }
+    const created = await this.clientModel.create({
+      salonId: scope.salonId,
+      name: dto.name,
+      phone: dto.phone,
+      email: dto.email,
+      commsConsent: true,
+      preferredChannel: 'email',
+      registered: false,
+      notes: '',
+      history: [],
+    });
+    return created._id as Types.ObjectId;
+  }
+
+  private isTxnUnsupported(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err);
+    return /Transaction numbers are only allowed on a replica set|Transactions are not supported|replica set/i.test(msg);
+  }
+
+  // ─── Backoffice ──────────────────────────────────────────────────────────────
+
+  async list(scope: SalonScope): Promise<OrderDocument[]> {
+    return this.orderModel.find({ salonId: scope.salonId }).sort({ date: -1 });
+  }
+
+  async updateStatus(scope: SalonScope, id: string, status: OrderStatus): Promise<OrderDocument> {
+    const order = await this.orderModel.findOne({ _id: id, salonId: scope.salonId });
+    if (!order) throw new NotFoundException('Order not found.');
+    if (!TRANSITIONS[order.status].includes(status)) {
+      throw new BadRequestException(`Invalid transition ${order.status} → ${status}.`);
+    }
+    order.status = status;
+    await order.save();
+    // Order→Sale À LA REMISE (picked_up), jamais à l'achat.
+    if (status === 'picked_up') {
+      await this.saleModel.create({
+        salonId: scope.salonId,
+        source: 'order',
+        items: order.items.map((i) => ({ refId: i.productId.toString(), name: i.name, qty: i.qty, unitPrice: i.unitPrice })),
+        total: order.total,
+        orderId: order._id,
+        date: new Date(),
+      });
+    }
     return order;
   }
 
-  // ─── Stats ─────────────────────────────────────────────────────────────────
-
-  async getStats() {
-    const today      = new Date(); today.setHours(0, 0, 0, 0);
-    const tomorrow   = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
-
-    const [total, todayCount, pending, byStatus, revenue] = await Promise.all([
-      this.orderModel.countDocuments(),
-      this.orderModel.countDocuments({ createdAt: { $gte: today, $lt: tomorrow } }),
-      this.orderModel.countDocuments({ status: OrderStatus.PENDING }),
-      this.orderModel.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]),
-      this.orderModel.aggregate([
-        { $match: { status: OrderStatus.DELIVERED } },
-        { $group: { _id: null, total: { $sum: '$totalAmount' }, count: { $sum: 1 } } },
-      ]),
-    ]);
-
-    const revenueData  = revenue[0] ?? { total: 0, count: 0 };
-    const statusCounts = Object.fromEntries(byStatus.map(s => [s._id, s.count]));
-
-    return {
-      total,
-      todayCount,
-      pending,
-      statusCounts,
-      totalRevenue:  revenueData.total,
-      avgCartValue:  revenueData.count > 0 ? revenueData.total / revenueData.count : 0,
-      deliveredCount: revenueData.count,
-    };
-  }
-
-  // ─── Helpers ───────────────────────────────────────────────────────────────
-
-  private async generateOrderNumber(): Promise<string> {
-    const year  = new Date().getFullYear();
-    const count = await this.orderModel.countDocuments();
-    const seq   = String(count + 1).padStart(6, '0');
-    return `ORD-${year}-${seq}`;
-  }
-
-  private async notifyStatusChange(order: OrderDocument, next: OrderStatus) {
-    const typeMap: Record<OrderStatus, NotifType | null> = {
-      [OrderStatus.CONFIRMED]: NotifType.ORDER_CONFIRMED,
-      [OrderStatus.PREPARING]: NotifType.ORDER_PREPARING,
-      [OrderStatus.READY]:     NotifType.ORDER_READY,
-      [OrderStatus.SHIPPED]:   NotifType.ORDER_SHIPPED,
-      [OrderStatus.DELIVERED]: NotifType.ORDER_DELIVERED,
-      [OrderStatus.CANCELLED]: NotifType.ORDER_CANCELLED,
-      [OrderStatus.REFUNDED]:  NotifType.ORDER_REFUNDED,
-      [OrderStatus.PENDING]:   null,
-    };
-
-    const notifType = typeMap[next];
-    if (!notifType) return;
-
-    const labelMap: Record<string, string> = {
-      [OrderStatus.CONFIRMED]: 'Commande confirmée',
-      [OrderStatus.PREPARING]: 'Commande en préparation',
-      [OrderStatus.READY]:     'Commande prête',
-      [OrderStatus.SHIPPED]:   'Commande expédiée',
-      [OrderStatus.DELIVERED]: 'Commande livrée',
-      [OrderStatus.CANCELLED]: 'Commande annulée',
-      [OrderStatus.REFUNDED]:  'Commande remboursée',
-    };
-
-    const body = `${order.orderNumber} — ${labelMap[next] ?? next}`;
-
-    if (order.userId) {
-      await this.notifications.push(order.userId.toString(), notifType, labelMap[next], body, {
-        orderId: order._id?.toString(),
-      });
-    }
-
-    if (next === OrderStatus.DELIVERED || next === OrderStatus.CANCELLED || next === OrderStatus.REFUNDED) {
-      await this.notifications.pushToManagers(notifType, labelMap[next], body, {
-        orderId: order._id?.toString(),
-      });
-    }
+  async track(scope: SalonScope, trackToken: string): Promise<OrderDocument> {
+    const order = await this.orderModel.findOne({ salonId: scope.salonId, trackToken });
+    if (!order) throw new NotFoundException('Order not found.');
+    return order;
   }
 }
