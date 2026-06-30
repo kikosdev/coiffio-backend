@@ -3,11 +3,8 @@ import { JwtModule } from '@nestjs/jwt';
 import { JwtGuard } from './guards/jwt.guard';
 import { OptionalJwtGuard } from './guards/optional-jwt.guard';
 import { RolesGuard } from './guards/roles.guard';
+import { PosScopeGuard } from './guards/pos-scope.guard';
 
-/**
- * Module commun global : enregistre JwtModule (secret/exp depuis l'env) et expose
- * les guards réutilisables à toute l'application. Importé une fois dans AppModule.
- */
 @Global()
 @Module({
   imports: [
@@ -20,7 +17,7 @@ import { RolesGuard } from './guards/roles.guard';
       },
     }),
   ],
-  providers: [JwtGuard, OptionalJwtGuard, RolesGuard],
-  exports: [JwtModule, JwtGuard, OptionalJwtGuard, RolesGuard],
+  providers: [JwtGuard, OptionalJwtGuard, RolesGuard, PosScopeGuard],
+  exports: [JwtModule, JwtGuard, OptionalJwtGuard, RolesGuard, PosScopeGuard],
 })
 export class CommonModule {}

@@ -4,13 +4,15 @@ import { Request } from 'express';
 export type Role = 'owner' | 'manager' | 'stylist' | 'colorist' | 'client';
 
 export interface AuthUser {
-  sub: string; // staff or user id
-  salonId: string;
+  sub: string;       // users._id (Identity Service)
+  salonId: string;   // résolu au login depuis le profil (Staff.salonId ou Client.salonId)
   role: Role;
   name?: string;
   email?: string;
   phone?: string;
   accountType: 'staff' | 'client';
+  staffId?: string;  // Staff._id — présent si role ∈ {owner, manager, stylist, colorist}
+  clientId?: string; // Client._id — présent si role = client
 }
 
 /**

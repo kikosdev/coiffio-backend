@@ -1,15 +1,28 @@
 import {
-  IsBoolean,
+  IsArray,
   IsEmail,
+  IsHexColor,
+  IsIn,
+  IsNumber,
   IsOptional,
   IsString,
+  Length,
+  Matches,
+  Max,
   MaxLength,
+  Min,
   MinLength,
 } from 'class-validator';
 
+const STAFF_ROLES = ['manager', 'stylist', 'colorist'] as const;
+const LEVELS = ['master', 'senior', 'apprentice'] as const;
+
 export class LoginDto {
-  @IsEmail()
-  email: string;
+  // Email OU téléphone — le backend détecte le type via normalizeIdentifier().
+  @IsString()
+  @MinLength(3)
+  @MaxLength(200)
+  identifier: string;
 
   @IsString()
   @MinLength(6)
@@ -23,13 +36,21 @@ export class RegisterDto {
   @MaxLength(120)
   name: string;
 
-  @IsEmail()
-  email: string;
+  // Identifiant de login (email ou téléphone).
+  @IsString()
+  @MinLength(3)
+  @MaxLength(200)
+  identifier: string;
 
+  // Téléphone TOUJOURS requis (clé d'identité client, merge-on-phone).
   @IsString()
   @MinLength(4)
   @MaxLength(32)
   phone: string;
+
+  @IsOptional()
+  @IsEmail()
+  email?: string;
 
   @IsString()
   @MinLength(6)
@@ -37,9 +58,66 @@ export class RegisterDto {
   password: string;
 }
 
+export class CreateStaffAuthDto {
+  @IsString()
+  @MinLength(2)
+  @MaxLength(120)
+  name: string;
+
+  // Identifiant de login du nouveau staff (email ou téléphone).
+  @IsString()
+  @MinLength(3)
+  @MaxLength(200)
+  identifier: string;
+
+  @IsIn(STAFF_ROLES)
+  role: 'manager' | 'stylist' | 'colorist';
+
+  @IsString()
+  @MinLength(6)
+  @MaxLength(128)
+  password: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(160)
+  email?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  phone?: string;
+
+  @IsOptional()
+  @IsHexColor()
+  color?: string;
+
+  @IsOptional()
+  @IsIn(LEVELS)
+  level?: 'master' | 'senior' | 'apprentice';
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  capabilities?: string[];
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  baseRate?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  commissionPct?: number;
+}
+
 export class PasswordResetRequestDto {
-  @IsEmail()
-  email: string;
+  @IsString()
+  @MinLength(3)
+  @MaxLength(200)
+  identifier: string;
 }
 
 export class PasswordResetConfirmDto {
@@ -80,8 +158,21 @@ export class UpdateMeDto {
   @MinLength(4)
   @MaxLength(32)
   phone?: string;
+}
 
-  @IsOptional()
-  @IsBoolean()
-  commsConsent?: boolean;
+export class LoginPinDto {
+  @IsString()
+  @Length(24, 24)
+  staffId: string;
+
+  @IsString()
+  @Length(4, 4)
+  @Matches(/^\d{4}$/, { message: 'PIN must be exactly 4 digits.' })
+  pin: string;
+}
+
+export interface PosTokenPayload {
+  staffId: string;
+  salonId: string;
+  scope: 'pos';
 }

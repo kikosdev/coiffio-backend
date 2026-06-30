@@ -1,7 +1,9 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
 import { Request } from 'express';
 import { TeamService } from './team.service';
-import { CreateStaffDto, UpdateStaffDto } from './dto/team.dto';
+import { AuthService } from '../auth/auth.service';
+import { CreateStaffAuthDto } from '../auth/dto/auth.dto';
+import { UpdateStaffDto } from './dto/team.dto';
 import { JwtGuard } from '../common/guards/jwt.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -9,16 +11,17 @@ import { getSalonScope } from '../common/scope/salon-scope';
 import { CurrentUser, AuthUser } from '../common/decorators/current-user.decorator';
 
 /**
- * Team (Sprint 3). Matrice : roster = owner·manager·stylist (besoin opérationnel — la paie
- * n'est jamais jointe pour un stylist, #9) ; créer/supprimer un compte = owner only ;
- * éditer profil/level/capabilities = owner·manager. `me/standing` = chiffres du stylist
- * courant UNIQUEMENT (#9). Enveloppe + scope partout.
+ * Team roster management. Staff account creation delegates to AuthService
+ * (identity split — credentials live in `users`, business profile in `staffs`).
  */
 @Controller('team')
 @UseGuards(JwtGuard, RolesGuard)
 @Roles('owner', 'manager', 'stylist')
 export class TeamController {
-  constructor(private readonly team: TeamService) {}
+  constructor(
+    private readonly team: TeamService,
+    private readonly auth: AuthService,
+  ) {}
 
   @Get()
   async list(@Req() req: Request, @CurrentUser('role') role: string) {
@@ -26,7 +29,6 @@ export class TeamController {
     return { data, message: 'OK' };
   }
 
-  /** #9 — paie/commission/tips du stylist courant uniquement (l'identité vient du JWT). */
   @Get('me/standing')
   async standing(@Req() req: Request, @CurrentUser() user: AuthUser) {
     const data = await this.team.myStanding(getSalonScope(req), user);
@@ -35,8 +37,9 @@ export class TeamController {
 
   @Post()
   @Roles('owner')
-  async create(@Req() req: Request, @Body() dto: CreateStaffDto) {
-    const data = await this.team.createStaff(getSalonScope(req), dto);
+  async create(@Req() req: Request, @Body() dto: CreateStaffAuthDto) {
+    const { salonId } = getSalonScope(req);
+    const data = await this.auth.createStaff(salonId, dto);
     return { data, message: 'Staff account created.' };
   }
 

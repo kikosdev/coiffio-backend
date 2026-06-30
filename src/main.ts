@@ -12,26 +12,14 @@ async function bootstrap() {
   app.setGlobalPrefix('api');
   app.use(cookieParser());
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
-  const allowedOrigins = [
-    'http://localhost:5173',
-    'https://coiffio-front.vercel.app',
-  ];
 
   // Convention #1 & #2 — enveloppe globale + filtre d'exception
   app.useGlobalInterceptors(new ResponseInterceptor());
   app.useGlobalFilters(new AllExceptionsFilter());
 
-  // CORS avec credentials (origin exact, jamais '*') — requis pour les cookies (Sprint 7)
-  app.enableCors({
-    origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error(`CORS blocked: ${origin}`));
-      }
-    },
-    credentials: true,
-  });
+  // CORS — exact origins only, never '*' (required for cookies + desktop Bearer)
+  const allowedOrigins = [process.env.FRONTEND_ORIGIN, process.env.DESKTOP_ORIGIN].filter((o): o is string => !!o);
+  app.enableCors({ origin: allowedOrigins, credentials: true });
 
   await app.listen(process.env.PORT || 3000);
   new Logger('Bootstrap').log(`SalonOS API on http://localhost:${process.env.PORT}/api`);

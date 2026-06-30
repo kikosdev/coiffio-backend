@@ -31,7 +31,7 @@ export class ScheduleController {
 
   /** Un stylist ne peut consulter que SA propre rota ; owner/manager voient toutes. */
   private assertCanRead(user: AuthUser, stylistId: string): void {
-    if (user.role === 'stylist' && user.sub !== stylistId) {
+    if (user.role === 'stylist' && (user.staffId ?? user.sub) !== stylistId) {
       throw new ForbiddenException('You can only view your own schedule.');
     }
   }

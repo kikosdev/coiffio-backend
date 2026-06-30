@@ -1,17 +1,16 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
-import * as bcrypt from 'bcryptjs';
 import { Staff, StaffDocument } from './schemas/staff.schema';
 import { Schedule, ScheduleDocument } from './schemas/schedule.schema';
 import { StaffProfile, StaffProfileDocument } from './schemas/staff-profile.schema';
 import { Appointment, AppointmentDocument } from '../booking/schemas/appointment.schema';
-import { CreateStaffDto, UpdateStaffDto } from './dto/team.dto';
+import { UpdateStaffDto } from './dto/team.dto';
 import { SalonScope } from '../common/scope/salon-scope';
 import { AuthUser } from '../common/decorators/current-user.decorator';
 
 const MANAGERS = ['owner', 'manager'];
-const BCRYPT_ROUNDS = 10;
 const MS_PER_MIN = 60_000;
 
 export interface PublicStaff {
@@ -45,20 +44,20 @@ export interface StylistStanding {
 @Injectable()
 export class TeamService {
   constructor(
-    @InjectModel(Staff.name) private readonly staffModel: Model<StaffDocument>,
-    @InjectModel(Schedule.name) private readonly scheduleModel: Model<ScheduleDocument>,
-    @InjectModel(StaffProfile.name) private readonly profileModel: Model<StaffProfileDocument>,
-    @InjectModel(Appointment.name) private readonly apptModel: Model<AppointmentDocument>,
+    @InjectModel(Staff.name)        private readonly staffModel:    Model<StaffDocument>,
+    @InjectModel(Schedule.name)     private readonly scheduleModel: Model<ScheduleDocument>,
+    @InjectModel(StaffProfile.name) private readonly profileModel:  Model<StaffProfileDocument>,
+    @InjectModel(Appointment.name)  private readonly apptModel:     Model<AppointmentDocument>,
   ) {}
 
   private toPublic(s: StaffDocument, profile?: StaffProfileDocument | null, includePay = false): PublicStaff {
     const base: PublicStaff = {
-      id: s._id.toString(),
-      name: s.name,
-      email: s.email,
-      phone: s.phone,
-      role: s.role,
-      color: s.color,
+      id:       s._id.toString(),
+      name:     s.name,
+      email:    s.email,
+      phone:    s.phone,
+      role:     s.role,
+      color:    s.color,
       isActive: s.isActive,
     };
     if (profile) {
@@ -72,7 +71,7 @@ export class TeamService {
     return base;
   }
 
-  // ─── Staff accounts ────────────────────────────────────────────────────
+  // ─── Staff accounts ────────────────────────────────────────────────────────
 
   async listStaff(scope: SalonScope, requesterRole: string): Promise<PublicStaff[]> {
     const includePay = MANAGERS.includes(requesterRole);
@@ -83,43 +82,6 @@ export class TeamService {
     const profiles = await this.profileModel.find({ salonId: scope.salonId });
     const byStaff = new Map(profiles.map((p) => [p.userId.toString(), p]));
     return staff.map((s) => this.toPublic(s, byStaff.get(s._id.toString()), includePay));
-  }
-
-  async createStaff(scope: SalonScope, dto: CreateStaffDto): Promise<PublicStaff> {
-    const email = dto.email.toLowerCase().trim();
-    const existing = await this.staffModel.findOne({ email });
-    if (existing) throw new ConflictException('An account with this email already exists.');
-    const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
-    const created = await this.staffModel.create({
-      salonId: scope.salonId,
-      name: dto.name,
-      email,
-      phone: dto.phone,
-      role: dto.role,
-      color: dto.color ?? '#B89968',
-      passwordHash,
-      isActive: true,
-      week: [],
-    });
-    // Crée une rota vide associée (overrides).
-    await this.scheduleModel.updateOne(
-      { salonId: scope.salonId, stylistId: created._id },
-      { $setOnInsert: { weekly: [], overrides: [] } },
-      { upsert: true },
-    );
-    // StaffProfile (surtout pour les stylists).
-    let profile: StaffProfileDocument | null = null;
-    if (['stylist', 'colorist'].includes(dto.role) || dto.level || dto.capabilities || dto.baseRate != null || dto.commissionPct != null) {
-      profile = await this.profileModel.create({
-        salonId: scope.salonId,
-        userId: created._id,
-        level: dto.level ?? 'senior',
-        capabilities: dto.capabilities ?? [],
-        baseRate: dto.baseRate ?? 0,
-        commissionPct: dto.commissionPct ?? 0,
-      });
-    }
-    return this.toPublic(created, profile, true);
   }
 
   async updateStaff(scope: SalonScope, id: string, dto: UpdateStaffDto): Promise<PublicStaff> {
@@ -169,10 +131,11 @@ export class TeamService {
     return this.toPublic(s, profile, true);
   }
 
-  // ─── Standing (#9 — le staff courant UNIQUEMENT) ──────────────────────
+  // ─── Standing (#9 — le staff courant UNIQUEMENT) ──────────────────────────
 
   async myStanding(scope: SalonScope, user: AuthUser): Promise<StylistStanding> {
-    const me = await this.staffModel.findOne({ _id: user.sub, salonId: scope.salonId });
+    // user.staffId = Staff._id (résolu au login depuis le profil staff).
+    const me = await this.staffModel.findOne({ _id: user.staffId, salonId: scope.salonId });
     if (!me) throw new NotFoundException('Account not found.');
     const profile = await this.profileModel.findOne({ salonId: scope.salonId, userId: me._id });
     const commissionPct = profile?.commissionPct ?? 0;
@@ -192,7 +155,6 @@ export class TeamService {
     const grossServices = completed.reduce((a, c) => a + (c.price ?? 0), 0);
     const estimatedCommission = Math.round((grossServices * commissionPct) / 100);
 
-    // Shifts à venir (7 prochains jours) — lus depuis Staff.week + Schedule.overrides.
     const upcomingShifts: { date: string; start: string; end: string }[] = [];
     const schedule = await this.scheduleModel.findOne({ salonId: scope.salonId, stylistId: me._id });
     const weekly = me.week ?? [];
@@ -211,14 +173,14 @@ export class TeamService {
     }
 
     return {
-      stylistId: me._id.toString(),
-      name: me.name,
-      level: profile?.level ?? 'senior',
-      baseRate: profile?.baseRate ?? 0,
+      stylistId:          me._id.toString(),
+      name:               me.name,
+      level:              profile?.level ?? 'senior',
+      baseRate:           profile?.baseRate ?? 0,
       commissionPct,
       upcomingShifts,
-      completedCount: completed.length,
-      upcomingCount: upcoming,
+      completedCount:     completed.length,
+      upcomingCount:      upcoming,
       grossServices,
       estimatedCommission,
       tips: 0,

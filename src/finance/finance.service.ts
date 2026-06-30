@@ -209,7 +209,7 @@ export class FinanceService {
   async myCaisse(scope: SalonScope, user: AuthUser): Promise<{ payments: PaymentDocument[]; totals: CaisseTotals }> {
     const { from, to } = this.periodRange('day');
     const payments = await this.paymentModel
-      .find({ salonId: scope.salonId, stylistId: new Types.ObjectId(user.sub), date: { $gte: from, $lte: to } })
+      .find({ salonId: scope.salonId, stylistId: new Types.ObjectId(user.staffId ?? user.sub), date: { $gte: from, $lte: to } })
       .sort({ date: -1 });
     return { payments, totals: this.totals(payments) };
   }

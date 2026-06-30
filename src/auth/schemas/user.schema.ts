@@ -1,49 +1,40 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';
+import { Document } from 'mongoose';
 
 export type UserDocument = User & Document;
 
-export type UserRole = 'client';
+export type UserRole = 'owner' | 'staff' | 'client';
 
 /**
- * Collection `User` — clients uniquement. Staff (owner/manager/stylist/colorist) vivent
- * dans la collection `Staff`. `passwordHash` absent ⇒ client invité (Décision #10).
- * `phone` est la clé d'identité côté client (merge-on-phone). `salonId` présent partout.
+ * Collection `users` — IDENTITÉ uniquement (Identity Service futur).
+ * Centralise les credentials de tous les rôles. Profils métier (`clients`, `staffs`)
+ * sont liés par userId et restent dans leurs propres collections.
  */
 @Schema({ timestamps: true })
 export class User {
-  @Prop({ type: Types.ObjectId, ref: 'Salon', required: true, index: true })
-  salonId: Types.ObjectId;
+  // Login identifier : email normalisé OU téléphone canonique (+216...).
+  // Unique tous rôles confondus — clé d'authentification.
+  @Prop({ required: true, unique: true, index: true })
+  identifier: string;
+
+  @Prop({ type: String, enum: ['email', 'phone'], required: true })
+  identifierType: 'email' | 'phone';
 
   @Prop({ required: true })
-  name: string;
+  passwordHash: string;
 
-  // email indexé unique (Décision #11 : email mandatoire)
-  @Prop({ required: true, lowercase: true, trim: true, unique: true, index: true })
-  email: string;
-
-  // phone indexé — clé d'identité client (Décision #10)
-  @Prop({ default: '', index: true })
-  phone: string;
-
-  // absent ⇒ guest ; défini ⇒ compte registered
-  @Prop()
-  passwordHash?: string;
-
-  @Prop({
-    type: String,
-    enum: ['client'],
-    default: 'client',
-    index: true,
-  })
+  @Prop({ type: String, enum: ['owner', 'staff', 'client'], required: true, index: true })
   role: UserRole;
 
   @Prop({ default: true })
   isActive: boolean;
 
-  // true dès qu'un passwordHash est défini (compte exploitable au login)
-  @Prop({ default: false })
-  registered: boolean;
+  // Expo push token — mobile notifications
+  @Prop()
+  expoPushToken?: string;
+
+  @Prop({ default: null })
+  lastLoginAt?: Date;
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

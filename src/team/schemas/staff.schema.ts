@@ -29,10 +29,14 @@ export class Staff {
   @Prop({ type: Types.ObjectId, ref: 'Salon', required: true, index: true })
   salonId: Types.ObjectId;
 
+  // Lien vers users (Identity Service). OBLIGATOIRE — tout staff a un compte.
+  @Prop({ type: Types.ObjectId, ref: 'User', required: true, index: true })
+  userId: Types.ObjectId;
+
   @Prop({ required: true })
   name: string;
 
-  // Unique par salon uniquement (pas globalement) — index composé défini ci-dessous.
+  // Unique par salon uniquement — index composé défini ci-dessous.
   @Prop({ lowercase: true, trim: true })
   email: string;
 
@@ -53,10 +57,6 @@ export class Staff {
   @Prop({ default: true })
   isActive: boolean;
 
-  @Prop()
-  passwordHash?: string;
-
-  /** Embedded weekly schedule — source of truth for working hours. */
   @Prop({
     type: [
       {
@@ -78,7 +78,6 @@ export class Staff {
   })
   week: WeeklyShift[];
 
-  /** Profil public (landing page). Unique par salon, visible / order contrôlables par l'owner. */
   @Prop({
     type: {
       visible: { type: Boolean, default: true },
@@ -90,9 +89,26 @@ export class Staff {
     _id: false,
   })
   publicProfile: PublicProfile;
+
+  @Prop({ type: String, select: false })
+  pinHash?: string;
+
+  @Prop({ type: Boolean, default: false })
+  posEnabled: boolean;
+
+  @Prop({ type: Date })
+  lastClockIn?: Date;
+
+  @Prop({ type: Number, default: 0, select: false })
+  pinAttempts: number;
+
+  @Prop({ type: Date, select: false })
+  pinLockedUntil?: Date;
 }
 
 export const StaffSchema = SchemaFactory.createForClass(Staff);
 StaffSchema.index({ salonId: 1, role: 1 });
-// email unique PAR salon (pas globalement) — sparse pour tolérer les membres sans email.
+// email unique PAR salon — sparse pour tolérer les membres sans email.
 StaffSchema.index({ salonId: 1, email: 1 }, { unique: true, sparse: true });
+// userId unique globalement — un seul profil staff par identité.
+StaffSchema.index({ userId: 1 }, { unique: true });

@@ -6,7 +6,6 @@ export type ClientDocument = Client & Document;
 export type PreferredChannel = 'email' | 'sms';
 export type HistoryType = 'appointment' | 'order';
 
-/** Entrée d'historique (alimentée aux Sprints 4/7). */
 export interface ClientHistoryEntry {
   type: HistoryType;
   refId: string;
@@ -15,33 +14,34 @@ export interface ClientHistoryEntry {
 }
 
 /**
- * Sprint 2 — CRM dual-mode (Décision #10 : phone = clé d'identité, merge-on-phone).
- * `registered:false` = client invité (guest). `salonId` partout (tenancy).
+ * Collection `clients` — profil métier CRM (Décision #10 : phone = clé d'identité,
+ * merge-on-phone). `userId = null` = client walk-in (sans compte). `userId` présent =
+ * client inscrit lié à la collection `users` (Identity Service).
  */
 @Schema({ timestamps: true })
 export class Client {
   @Prop({ type: Types.ObjectId, ref: 'Salon', required: true, index: true })
   salonId: Types.ObjectId;
 
+  // Lien vers users (Identity). NULL = walk-in sans compte.
+  @Prop({ type: Types.ObjectId, ref: 'User', default: null })
+  userId: Types.ObjectId | null;
+
   @Prop({ required: true })
   name: string;
 
-  // phone = clé d'identité (#10) — indexé, scopé par salon (unicité applicative dans le service)
+  // phone = clé d'identité (#10) — index unique composé (salonId, phone)
   @Prop({ required: true, trim: true, index: true })
   phone: string;
 
   @Prop({ default: '', lowercase: true, trim: true })
   email: string;
 
-  // Décision #11 : consentement comms + canal préféré (email V1, SMS V2)
   @Prop({ default: true })
   commsConsent: boolean;
 
   @Prop({ type: String, enum: ['email', 'sms'], default: 'email' })
   preferredChannel: PreferredChannel;
-
-  @Prop({ default: false })
-  registered: boolean;
 
   @Prop({ default: '' })
   notes: string;
@@ -62,5 +62,5 @@ export class Client {
 
 export const ClientSchema = SchemaFactory.createForClass(Client);
 
-// Index composé : recherche/scoping par salon + phone (clé d'identité).
-ClientSchema.index({ salonId: 1, phone: 1 });
+// Index unique composé : un seul client par (salonId, phone) — merge-on-phone (#10).
+ClientSchema.index({ salonId: 1, phone: 1 }, { unique: true });

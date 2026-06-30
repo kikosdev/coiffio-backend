@@ -4,25 +4,30 @@ import {
   Get,
   Patch,
   Post,
+  Req,
   Res,
   UseGuards,
 } from '@nestjs/common';
-import { Response } from 'express';
+import { Request, Response } from 'express';
 import { AuthService, PublicUser } from './auth.service';
 import {
   ChangePasswordDto,
+  CreateStaffAuthDto,
   LoginDto,
+  LoginPinDto,
   PasswordResetConfirmDto,
   PasswordResetRequestDto,
   RegisterDto,
   UpdateMeDto,
 } from './dto/auth.dto';
 import { JwtGuard } from '../common/guards/jwt.guard';
+import { RolesGuard } from '../common/guards/roles.guard';
+import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser, AuthUser } from '../common/decorators/current-user.decorator';
+import { getSalonScope } from '../common/scope/salon-scope';
 
 const COOKIE_NAME = 'access_token';
 
-/** Toutes les routes renvoient l'enveloppe { data, message, statusCode } (convention #1). */
 @Controller('auth')
 export class AuthController {
   constructor(private readonly auth: AuthService) {}
@@ -33,7 +38,7 @@ export class AuthController {
       httpOnly: true,
       sameSite: isProd ? 'none' : 'lax',
       secure: isProd,
-      maxAge: 1000 * 60 * 60 * 24 * 7, // 7 jours
+      maxAge: 1000 * 60 * 60 * 24 * 7,
       path: '/',
     });
   }
@@ -48,6 +53,14 @@ export class AuthController {
     return { data: result, message: 'Signed in successfully.' };
   }
 
+  @Post('login-pin')
+  async loginPin(
+    @Body() dto: LoginPinDto,
+  ): Promise<{ data: { token: string; staff: { id: string; name: string; first: string; color: string } }; message: string }> {
+    const data = await this.auth.loginPin(dto);
+    return { data, message: 'Signed in to POS.' };
+  }
+
   @Post('register')
   async register(
     @Body() dto: RegisterDto,
@@ -56,6 +69,28 @@ export class AuthController {
     const result = await this.auth.register(dto);
     this.setAuthCookie(res, result.token);
     return { data: result, message: 'Account created successfully.' };
+  }
+
+  @Post('register/client')
+  async registerClient(
+    @Body() dto: RegisterDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<{ data: { token: string; user: PublicUser }; message: string }> {
+    const result = await this.auth.register(dto);
+    this.setAuthCookie(res, result.token);
+    return { data: result, message: 'Account created successfully.' };
+  }
+
+  @Post('staff')
+  @UseGuards(JwtGuard, RolesGuard)
+  @Roles('owner')
+  async createStaff(
+    @Req() req: Request,
+    @Body() dto: CreateStaffAuthDto,
+  ): Promise<{ data: { user: PublicUser }; message: string }> {
+    const { salonId } = getSalonScope(req);
+    const data = await this.auth.createStaff(salonId, dto);
+    return { data, message: 'Staff account created.' };
   }
 
   @Post('password-reset/request')

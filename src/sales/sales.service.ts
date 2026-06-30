@@ -134,7 +134,7 @@ export class SalesService {
               : undefined,
             total,
             method: dto.method,
-            stylistId: new Types.ObjectId(user.sub),
+            stylistId: new Types.ObjectId(user.staffId ?? user.sub),
             date,
             voided: false,
             stockRestored: false,
@@ -212,7 +212,7 @@ export class SalesService {
       .find({
         salonId: scope.salonId,
         source: 'pos',
-        stylistId: new Types.ObjectId(user.sub),
+        stylistId: new Types.ObjectId(user.staffId ?? user.sub),
         voided: { $ne: true },
         date: { $gte: from, $lte: to },
       })
@@ -222,7 +222,7 @@ export class SalesService {
   async findOne(id: string, user: AuthUser, scope: SalonScope): Promise<SaleDocument> {
     const sale = await this.saleModel.findOne({ _id: id, salonId: scope.salonId, source: 'pos' });
     if (!sale) throw new NotFoundException('Vente introuvable.');
-    if (user.role === 'stylist' && sale.stylistId?.toString() !== user.sub) {
+    if (user.role === 'stylist' && sale.stylistId?.toString() !== (user.staffId ?? user.sub)) {
       throw new ForbiddenException('Accès refusé.');
     }
     return sale;
