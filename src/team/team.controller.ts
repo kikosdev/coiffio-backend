@@ -1,0 +1,59 @@
+import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import { Request } from 'express';
+import { TeamService } from './team.service';
+import { AuthService } from '../auth/auth.service';
+import { CreateStaffAuthDto } from '../auth/dto/auth.dto';
+import { UpdateStaffDto } from './dto/team.dto';
+import { JwtGuard } from '../common/guards/jwt.guard';
+import { RolesGuard } from '../common/guards/roles.guard';
+import { Roles } from '../common/decorators/roles.decorator';
+import { getSalonScope } from '../common/scope/salon-scope';
+import { CurrentUser, AuthUser } from '../common/decorators/current-user.decorator';
+
+/**
+ * Team roster management. Staff account creation now delegates to AuthService
+ * (identity split — credentials live in `users`, business profile in `staffs`).
+ */
+@Controller('team')
+@UseGuards(JwtGuard, RolesGuard)
+@Roles('owner', 'manager', 'stylist')
+export class TeamController {
+  constructor(
+    private readonly team: TeamService,
+    private readonly auth: AuthService,
+  ) {}
+
+  @Get()
+  async list(@Req() req: Request, @CurrentUser('role') role: string) {
+    const data = await this.team.listStaff(getSalonScope(req), role);
+    return { data, message: 'OK' };
+  }
+
+  @Get('me/standing')
+  async standing(@Req() req: Request, @CurrentUser() user: AuthUser) {
+    const data = await this.team.myStanding(getSalonScope(req), user);
+    return { data, message: 'OK' };
+  }
+
+  @Post()
+  @Roles('owner')
+  async create(@Req() req: Request, @Body() dto: CreateStaffAuthDto) {
+    const { salonId } = getSalonScope(req);
+    const data = await this.auth.createStaff(salonId, dto);
+    return { data, message: 'Staff account created.' };
+  }
+
+  @Patch(':id')
+  @Roles('owner', 'manager')
+  async update(@Req() req: Request, @Param('id') id: string, @Body() dto: UpdateStaffDto) {
+    const data = await this.team.updateStaff(getSalonScope(req), id, dto);
+    return { data, message: 'Staff account updated.' };
+  }
+
+  @Delete(':id')
+  @Roles('owner')
+  async deactivate(@Req() req: Request, @Param('id') id: string) {
+    const data = await this.team.deactivateStaff(getSalonScope(req), id);
+    return { data, message: 'Staff account deactivated.' };
+  }
+}
