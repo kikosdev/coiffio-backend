@@ -15,6 +15,8 @@ import { OverviewModule } from './overview/overview.module';
 import { SettingsModule } from './settings/settings.module';
 import { PublicModule } from './public/public.module';
 import { SalesModule } from './sales/sales.module';
+import { SalonsModule } from './salons/salons.module';
+import { MarketplaceModule } from './marketplace/marketplace.module';
 import { AppController } from './app.controller';
 
 @Module({
@@ -35,6 +37,8 @@ import { AppController } from './app.controller';
     SettingsModule,
     PublicModule,
     SalesModule,
+    SalonsModule,
+    MarketplaceModule,
   ],
   controllers: [AppController],
 })

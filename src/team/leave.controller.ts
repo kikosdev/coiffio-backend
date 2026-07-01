@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Request } from 'express';
 import { LeaveService } from './leave.service';
 import { CreateLeaveRequestDto, ListLeaveQueryDto } from './dto/team.dto';
@@ -14,24 +15,32 @@ import { CurrentUser, AuthUser } from '../common/decorators/current-user.decorat
  * le BLOCK + force reassign (#6) : si des bookings collisionnent → **409** avec la liste
  * des conflits, sans rien approuver.
  */
+@ApiTags('Leave')
+@ApiBearerAuth()
 @Controller('leave-requests')
 @UseGuards(JwtGuard, RolesGuard)
 @Roles('owner', 'manager', 'stylist')
 export class LeaveController {
   constructor(private readonly leave: LeaveService) {}
 
+  @ApiOperation({ summary: 'List leave requests for the salon (scoped to self for stylists)' })
+  @ApiResponse({ status: 200, description: 'OK' })
   @Get()
   async list(@Req() req: Request, @CurrentUser() user: AuthUser, @Query() query: ListLeaveQueryDto) {
     const data = await this.leave.list(getSalonScope(req), user, query.status);
     return { data, message: 'OK' };
   }
 
+  @ApiOperation({ summary: 'Submit a new leave request' })
+  @ApiResponse({ status: 201, description: 'Leave request submitted.' })
   @Post()
   async create(@Req() req: Request, @CurrentUser() user: AuthUser, @Body() dto: CreateLeaveRequestDto) {
     const data = await this.leave.create(getSalonScope(req), user, dto);
     return { data, message: 'Leave request submitted.' };
   }
 
+  @ApiOperation({ summary: 'Approve a leave request (owner/manager only)' })
+  @ApiResponse({ status: 201, description: 'Leave approved.' })
   @Post(':id/approve')
   @Roles('owner', 'manager')
   async approve(@Req() req: Request, @CurrentUser() user: AuthUser, @Param('id') id: string) {
@@ -40,6 +49,8 @@ export class LeaveController {
     return { data, message: 'Leave approved.' };
   }
 
+  @ApiOperation({ summary: 'Reject a leave request (owner/manager only)' })
+  @ApiResponse({ status: 201, description: 'Leave request rejected.' })
   @Post(':id/reject')
   @Roles('owner', 'manager')
   async reject(@Req() req: Request, @CurrentUser() user: AuthUser, @Param('id') id: string) {

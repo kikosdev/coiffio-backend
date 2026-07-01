@@ -4,6 +4,20 @@ import { FilterQuery, Model } from 'mongoose';
 import { Client, ClientDocument } from './schemas/client.schema';
 import { CreateClientDto, UpdateClientDto } from './dto/client.dto';
 import { SalonScope } from '../common/scope/salon-scope';
+import { Appointment, AppointmentDocument } from '../booking/schemas/appointment.schema';
+
+export interface LatestVisit {
+  appointmentId: string;
+  barber: {
+    id: string | null;
+    name: string;
+    avatar: string | null;
+    rating: number | null;
+    reviewCount: number | null;
+    isPro: boolean;
+  };
+  lastVisitAt: Date;
+}
 
 /**
  * Pattern CRUD canonique (Sprint 2) — répliqué par tous les modules suivants.
@@ -11,7 +25,38 @@ import { SalonScope } from '../common/scope/salon-scope';
  */
 @Injectable()
 export class ClientsService {
-  constructor(@InjectModel(Client.name) private readonly model: Model<ClientDocument>) {}
+  constructor(
+    @InjectModel(Client.name) private readonly model: Model<ClientDocument>,
+    @InjectModel(Appointment.name) private readonly apptModel: Model<AppointmentDocument>,
+  ) {}
+
+  /**
+   * Dernier RDV `completed` du client courant (SKILL_client_home_dynamic HOME.3).
+   * Aucune fabrication de visite : `null` si le client n'a aucun historique.
+   */
+  async getLatestVisit(clientId: string): Promise<LatestVisit | null> {
+    const appt: any = await this.apptModel
+      .findOne({ clientId, status: 'completed' })
+      .sort({ start: -1 })
+      .populate('stylistId', 'name')
+      .lean();
+
+    if (!appt) return null;
+
+    const staff = appt.stylistId as { _id: { toString(): string }; name: string } | null;
+    return {
+      appointmentId: appt._id.toString(),
+      barber: {
+        id: staff?._id?.toString() ?? null,
+        name: staff?.name ?? 'Barber',
+        avatar: null, // pas de champ avatar sur Staff aujourd'hui
+        rating: null, // pas de collection reviews aujourd'hui (DH-3)
+        reviewCount: null,
+        isPro: false,
+      },
+      lastVisitAt: appt.start,
+    };
+  }
 
   /** Liste scopée, recherche optionnelle `q` sur name/phone/email. */
   async findAll(scope: SalonScope, q?: string): Promise<ClientDocument[]> {

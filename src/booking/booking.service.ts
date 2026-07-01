@@ -15,6 +15,7 @@ import { Schedule, ScheduleDocument } from '../team/schemas/schedule.schema';
 import { StaffProfile, StaffProfileDocument } from '../team/schemas/staff-profile.schema';
 import { Client, ClientDocument } from '../clients/schemas/client.schema';
 import { Staff, StaffDocument } from '../team/schemas/staff.schema';
+import { Salon, SalonDocument } from '../seed/schemas/salon.schema';
 import {
   AvailabilityQueryDto,
   AvailabilityTimelineQueryDto,
@@ -77,6 +78,7 @@ export class BookingService {
     @InjectModel(StaffProfile.name) private readonly profileModel: Model<StaffProfileDocument>,
     @InjectModel(Client.name) private readonly clientModel: Model<ClientDocument>,
     @InjectModel(Staff.name) private readonly staffModel: Model<StaffDocument>,
+    @InjectModel(Salon.name) private readonly salonModel: Model<SalonDocument>,
     @InjectConnection() private readonly connection: Connection,
     private readonly notifications: NotificationsService,
   ) {}
@@ -450,25 +452,67 @@ export class BookingService {
   // ─── Read / cancel ──────────────────────────────────────────────────────────
 
   /**
-   * Appointments for the currently logged-in client. Finds the CRM Client record by
-   * phone (primary key) falling back to email, then returns all their appointments
-   * with services and stylist populated.
+   * Appointments for the currently logged-in client, CROSS-SALON (SKILL_client_appointments_dynamic
+   * BK.1). A client identity (`Client.userId`) can hold one `Client` doc per salon they've ever
+   * booked at — collect them all rather than scoping to a single salon.
    */
-  async listMine(scope: SalonScope, user: AuthUser): Promise<AppointmentDocument[]> {
-    const orClauses: FilterQuery<ClientDocument>[] = [];
-    if (user.phone) orClauses.push({ phone: user.phone });
-    if (user.email) orClauses.push({ email: user.email });
-    if (orClauses.length === 0) return [];
+  async listMine(user: AuthUser, scope: 'upcoming' | 'history'): Promise<Record<string, unknown>[]> {
+    const clientIds = await this.clientModel.find({ userId: user.sub }).distinct('_id');
+    if (!clientIds.length) return [];
 
-    const client = await this.clientModel.findOne({ salonId: scope.salonId, $or: orClauses });
-    if (!client) return [];
+    const now = new Date();
+    const filter: FilterQuery<AppointmentDocument> =
+      scope === 'upcoming'
+        ? { clientId: { $in: clientIds }, status: { $in: ACTIVE_STATUSES }, start: { $gte: now } }
+        : {
+            clientId: { $in: clientIds },
+            $or: [
+              { status: { $in: ['completed', 'cancelled', 'noshow'] } },
+              { status: { $in: ACTIVE_STATUSES }, start: { $lt: now } },
+            ],
+          };
 
-    return this.apptModel
-      .find({ salonId: scope.salonId, clientId: client._id })
-      .populate('services', 'name durationMin price')
-      .populate('stylistId', 'name color')
-      .sort({ start: -1 })
-      .exec();
+    const appts: any[] = await this.apptModel
+      .find(filter)
+      .sort({ start: scope === 'upcoming' ? 1 : -1 })
+      .populate('services', 'name price')
+      .populate('stylistId', 'name')
+      .lean();
+
+    // Join StaffProfile (publicTitle / seniorityTag) — clé réelle = staff._id (cf public.service.ts).
+    const staffIds = appts.map((a) => a.stylistId?._id).filter(Boolean);
+    const profiles = await this.profileModel
+      .find({ userId: { $in: staffIds } })
+      .select('userId publicTitle seniorityTag')
+      .lean();
+    const profileByStaffId = new Map(profiles.map((p) => [p.userId.toString(), p]));
+
+    // Join Salon name (appointments peuvent venir de salons différents).
+    const salonIds = [...new Set(appts.map((a) => a.salonId.toString()))].map((id) => new Types.ObjectId(id));
+    const salons = await this.salonModel.find({ _id: { $in: salonIds } }).select('name').lean();
+    const salonById = new Map(salons.map((s) => [s._id.toString(), s]));
+
+    return appts.map((a) => {
+      const staff = a.stylistId as { _id: Types.ObjectId; name: string } | null;
+      const profile = staff ? profileByStaffId.get(staff._id.toString()) : undefined;
+      return {
+        id: a._id.toString(),
+        salonId: a.salonId.toString(),
+        salonName: salonById.get(a.salonId.toString())?.name ?? null,
+        barber: {
+          id: staff?._id?.toString() ?? null,
+          name: staff?.name ?? 'Barber',
+          title: profile?.publicTitle || null,
+          isPro: profile?.seniorityTag === 'Master',
+          initials: (staff?.name ?? 'B').split(' ').map((w: string) => w[0] ?? '').join('').slice(0, 2).toUpperCase(),
+        },
+        services: (a.services ?? []).map((s: any) => ({ id: s._id.toString(), name: s.name, price: s.price })),
+        start: a.start,
+        end: a.end,
+        price: a.price,
+        status: a.status as string,
+      };
+    });
   }
 
   async list(scope: SalonScope, date?: string, stylistId?: string): Promise<AppointmentDocument[]> {
@@ -494,17 +538,37 @@ export class BookingService {
   }
 
   /**
-   * Annulation : autorisée au staff (JWT) OU au client via lien signé (#12).
-   * Passe le statut à 'cancelled' → libère le créneau (réintègre la disponibilité live).
+   * Annulation : autorisée au staff (JWT, même salon), au client via lien signé (#12),
+   * OU au client propriétaire via son propre JWT (SKILL_client_appointments_dynamic BK.2 —
+   * salon dérivé de l'appointment, pas de getSalonScope : le client peut posséder des RDV
+   * dans plusieurs salons).
    */
-  async cancel(scope: SalonScope, id: string, opts: { user?: AuthUser; dto?: CancelAppointmentDto }): Promise<AppointmentDocument> {
-    const appt = await this.apptModel.findOne({ _id: id, salonId: scope.salonId });
+  async cancel(scope: SalonScope | null, id: string, opts: { user?: AuthUser; dto?: CancelAppointmentDto }): Promise<AppointmentDocument> {
+    const appt = await this.apptModel.findOne({ _id: id });
     if (!appt) throw new NotFoundException('Appointment not found.');
 
-    const isStaff = !!opts.user && ['owner', 'manager', 'stylist', 'colorist'].includes(opts.user.role);
+    const isStaff =
+      !!opts.user &&
+      ['owner', 'manager', 'stylist', 'colorist'].includes(opts.user.role) &&
+      !!scope &&
+      appt.salonId.toString() === scope.salonId; // isolation multi-tenant : même salon requis
     const tokenOk = !!opts.dto?.token && verifyAppointmentToken(id, opts.dto.token);
-    if (!isStaff && !tokenOk) {
+
+    let isOwnerClient = false;
+    if (!isStaff && !tokenOk && opts.user?.role === 'client') {
+      const ownClientIds = await this.clientModel.find({ userId: opts.user.sub }).distinct('_id');
+      isOwnerClient = ownClientIds.some((cid) => cid.toString() === appt.clientId.toString());
+    }
+
+    if (!isStaff && !tokenOk && !isOwnerClient) {
       throw new ForbiddenException('Not allowed to cancel this appointment.');
+    }
+    if (!ACTIVE_STATUSES.includes(appt.status)) {
+      throw new BadRequestException('Appointment already completed or cancelled.');
+    }
+    // Un client ne peut annuler qu'un RDV à venir (pas de "cancel" rétroactif sur son propre historique).
+    if (isOwnerClient && !isStaff && !tokenOk && appt.start < new Date()) {
+      throw new BadRequestException('This appointment is in the past.');
     }
 
     appt.status = 'cancelled';

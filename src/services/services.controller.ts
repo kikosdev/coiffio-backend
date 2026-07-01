@@ -10,6 +10,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Request } from 'express';
 import { ServicesService } from './services.service';
 import { CreateServiceDto, ListServicesQueryDto, UpdateServiceDto } from './dto/service.dto';
@@ -23,12 +24,16 @@ import { ServiceDocument } from './schemas/service.schema';
  * Catalogue services (Sprint 2). Matrice : lecture = tous (authentifiés) ;
  * create/edit/delete = owner·manager. getSalonScope() partout. Enveloppe standard.
  */
+@ApiTags('Services')
+@ApiBearerAuth()
 @Controller('services')
 @UseGuards(JwtGuard, RolesGuard)
 export class ServicesController {
   constructor(private readonly services: ServicesService) {}
 
   // Lecture : tout user authentifié (pas de @Roles ⇒ RolesGuard laisse passer).
+  @ApiOperation({ summary: 'List services in the catalog for the current salon' })
+  @ApiResponse({ status: 200, description: 'OK' })
   @Get()
   async list(
     @Req() req: Request,
@@ -38,6 +43,8 @@ export class ServicesController {
     return { data, message: 'OK' };
   }
 
+  @ApiOperation({ summary: 'Create a new service in the catalog' })
+  @ApiResponse({ status: 201, description: 'Service created.' })
   @Post()
   @Roles('owner', 'manager')
   async create(
@@ -48,6 +55,8 @@ export class ServicesController {
     return { data, message: 'Service created.' };
   }
 
+  @ApiOperation({ summary: 'Update a service in the catalog' })
+  @ApiResponse({ status: 200, description: 'Service updated.' })
   @Patch(':id')
   @Roles('owner', 'manager')
   async update(
@@ -59,6 +68,8 @@ export class ServicesController {
     return { data, message: 'Service updated.' };
   }
 
+  @ApiOperation({ summary: 'Archive (soft-delete) a service from the catalog' })
+  @ApiResponse({ status: 200, description: 'Service archived.' })
   @Delete(':id')
   @Roles('owner', 'manager')
   async remove(

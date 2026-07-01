@@ -1,4 +1,5 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Request } from 'express';
 import { TeamService } from './team.service';
 import { AuthService } from '../auth/auth.service';
@@ -14,6 +15,8 @@ import { CurrentUser, AuthUser } from '../common/decorators/current-user.decorat
  * Team roster management. Staff account creation delegates to AuthService
  * (identity split — credentials live in `users`, business profile in `staffs`).
  */
+@ApiTags('Team')
+@ApiBearerAuth()
 @Controller('team')
 @UseGuards(JwtGuard, RolesGuard)
 @Roles('owner', 'manager', 'stylist')
@@ -23,18 +26,24 @@ export class TeamController {
     private readonly auth: AuthService,
   ) {}
 
+  @ApiOperation({ summary: 'List staff members for the salon' })
+  @ApiResponse({ status: 200, description: 'OK' })
   @Get()
   async list(@Req() req: Request, @CurrentUser('role') role: string) {
     const data = await this.team.listStaff(getSalonScope(req), role);
     return { data, message: 'OK' };
   }
 
+  @ApiOperation({ summary: "Get the current staff member's standing" })
+  @ApiResponse({ status: 200, description: 'OK' })
   @Get('me/standing')
   async standing(@Req() req: Request, @CurrentUser() user: AuthUser) {
     const data = await this.team.myStanding(getSalonScope(req), user);
     return { data, message: 'OK' };
   }
 
+  @ApiOperation({ summary: 'Create a new staff account (owner only)' })
+  @ApiResponse({ status: 201, description: 'Staff account created.' })
   @Post()
   @Roles('owner')
   async create(@Req() req: Request, @Body() dto: CreateStaffAuthDto) {
@@ -43,6 +52,8 @@ export class TeamController {
     return { data, message: 'Staff account created.' };
   }
 
+  @ApiOperation({ summary: 'Update a staff account (owner/manager only)' })
+  @ApiResponse({ status: 200, description: 'Staff account updated.' })
   @Patch(':id')
   @Roles('owner', 'manager')
   async update(@Req() req: Request, @Param('id') id: string, @Body() dto: UpdateStaffDto) {
@@ -50,6 +61,8 @@ export class TeamController {
     return { data, message: 'Staff account updated.' };
   }
 
+  @ApiOperation({ summary: 'Deactivate a staff account (owner only)' })
+  @ApiResponse({ status: 200, description: 'Staff account deactivated.' })
   @Delete(':id')
   @Roles('owner')
   async deactivate(@Req() req: Request, @Param('id') id: string) {

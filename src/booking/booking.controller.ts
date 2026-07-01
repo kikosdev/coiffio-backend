@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Request } from 'express';
 import { BookingService } from './booking.service';
 import {
@@ -8,6 +9,7 @@ import {
   CreateAppointmentDto,
   CreateWalkinDto,
   ListAppointmentsQueryDto,
+  MineQueryDto,
 } from './dto/booking.dto';
 import { JwtGuard } from '../common/guards/jwt.guard';
 import { OptionalJwtGuard } from '../common/guards/optional-jwt.guard';
@@ -21,6 +23,7 @@ import { CurrentUser, AuthUser } from '../common/decorators/current-user.decorat
  * transactionnel (#6) ; services chaînés = un bloc, un groupId (#3). Routes publiques
  * (storefront) sous OptionalJwt ; routes backoffice sous JWT + RolesGuard. Enveloppe + scope.
  */
+@ApiTags('Booking')
 @Controller()
 export class BookingController {
   constructor(private readonly booking: BookingService) {}
@@ -28,6 +31,8 @@ export class BookingController {
   // ─── Public (storefront) ────────────────────────────────────────────────
 
   /** Catalogue services public (parcours Book a Visit, étape BookServices). */
+  @ApiOperation({ summary: 'Get the public services catalogue for the salon' })
+  @ApiResponse({ status: 200, description: 'OK' })
   @Get('book/services')
   @UseGuards(OptionalJwtGuard)
   async catalog(@Req() req: Request, @Query('gender') gender?: string) {
@@ -36,6 +41,8 @@ export class BookingController {
   }
 
   /** Availability : public (OptionalJwt) — lue par le parcours Book a Visit et le backoffice. */
+  @ApiOperation({ summary: 'Get live appointment availability for a given day' })
+  @ApiResponse({ status: 200, description: 'OK' })
   @Get('availability')
   @UseGuards(OptionalJwtGuard)
   async availability(@Req() req: Request, @Query() query: AvailabilityQueryDto) {
@@ -44,6 +51,8 @@ export class BookingController {
   }
 
   /** Timeline multi-jours : mêmes garanties que /availability, vue 7 jours (par défaut) pour le Step II du parcours. */
+  @ApiOperation({ summary: 'Get a multi-day availability timeline (7 days by default)' })
+  @ApiResponse({ status: 200, description: 'OK' })
   @Get('availability/timeline')
   @UseGuards(OptionalJwtGuard)
   async availabilityTimeline(@Req() req: Request, @Query() query: AvailabilityTimelineQueryDto) {
@@ -52,6 +61,8 @@ export class BookingController {
   }
 
   /** Création RDV : public en 'online' (#10 merge-on-phone) ou staff en 'phone'. Transaction + 409. */
+  @ApiOperation({ summary: "Book a new appointment (public 'online' or staff 'phone')" })
+  @ApiResponse({ status: 201, description: 'Appointment booked.' })
   @Post('appointments')
   @UseGuards(OptionalJwtGuard)
   async create(@Req() req: Request, @CurrentUser() user: AuthUser | undefined, @Body() dto: CreateAppointmentDto) {
@@ -60,6 +71,8 @@ export class BookingController {
   }
 
   /** Annulation : staff (JWT) ou client via lien signé `?token=` (#12). */
+  @ApiOperation({ summary: 'Cancel an appointment (staff or client via signed link token)' })
+  @ApiResponse({ status: 200, description: 'Appointment cancelled.' })
   @Patch('appointments/:id/cancel')
   @UseGuards(OptionalJwtGuard)
   async cancel(
@@ -72,16 +85,22 @@ export class BookingController {
     return { data, message: 'Appointment cancelled.' };
   }
 
-  /** Client self-service: returns the caller's own appointments (populated). */
+  /** Client self-service: caller's own appointments, cross-salon (populated). */
+  @ApiOperation({ summary: "Get the current client's own appointments across salons" })
+  @ApiResponse({ status: 200, description: 'OK' })
+  @ApiBearerAuth()
   @Get('appointments/mine')
   @UseGuards(JwtGuard)
-  async mine(@Req() req: Request, @CurrentUser() user: AuthUser) {
-    const data = await this.booking.listMine(getSalonScope(req), user);
+  async mine(@CurrentUser() user: AuthUser, @Query() query: MineQueryDto) {
+    const data = await this.booking.listMine(user, query.scope ?? 'upcoming');
     return { data, message: 'OK' };
   }
 
   // ─── Backoffice (staff) ──────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Create a walk-in appointment (staff)' })
+  @ApiResponse({ status: 201, description: 'Walk-in created.' })
+  @ApiBearerAuth()
   @Post('appointments/walkin')
   @UseGuards(JwtGuard, RolesGuard)
   @Roles('owner', 'manager', 'stylist', 'colorist')
@@ -90,6 +109,9 @@ export class BookingController {
     return { data, message: 'Walk-in created.' };
   }
 
+  @ApiOperation({ summary: 'List appointments for the salon, optionally filtered by date/stylist' })
+  @ApiResponse({ status: 200, description: 'OK' })
+  @ApiBearerAuth()
   @Get('appointments')
   @UseGuards(JwtGuard, RolesGuard)
   @Roles('owner', 'manager', 'stylist', 'colorist')
@@ -98,6 +120,9 @@ export class BookingController {
     return { data, message: 'OK' };
   }
 
+  @ApiOperation({ summary: 'List the appointments belonging to a chained booking group' })
+  @ApiResponse({ status: 200, description: 'OK' })
+  @ApiBearerAuth()
   @Get('appointments/group/:groupId')
   @UseGuards(JwtGuard, RolesGuard)
   @Roles('owner', 'manager', 'stylist', 'colorist')
@@ -106,6 +131,9 @@ export class BookingController {
     return { data, message: 'OK' };
   }
 
+  @ApiOperation({ summary: 'Get a single appointment by id' })
+  @ApiResponse({ status: 200, description: 'OK' })
+  @ApiBearerAuth()
   @Get('appointments/:id')
   @UseGuards(JwtGuard, RolesGuard)
   @Roles('owner', 'manager', 'stylist', 'colorist')

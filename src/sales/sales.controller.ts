@@ -1,4 +1,5 @@
 import { Body, Controller, Delete, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Request } from 'express';
 import { SalesService } from './sales.service';
 import { BestSellersQueryDto, CreateSaleDto, SalesQueryDto } from './dto/create-sale.dto';
@@ -9,11 +10,15 @@ import { getSalonScope } from '../common/scope/salon-scope';
 import { CurrentUser, AuthUser } from '../common/decorators/current-user.decorator';
 
 /** Ventes retail POS (Sprint 6). Comptoir sans RDV, décrément stock, best-sellers. */
+@ApiTags('Sales')
+@ApiBearerAuth()
 @Controller()
 @UseGuards(JwtGuard, RolesGuard)
 export class SalesController {
   constructor(private readonly sales: SalesService) {}
 
+  @ApiOperation({ summary: 'Record a new retail POS sale and decrement stock' })
+  @ApiResponse({ status: 201, description: 'Vente enregistrée.' })
   @Post('sales')
   @Roles('owner', 'manager', 'stylist')
   async create(@Req() req: Request, @CurrentUser() user: AuthUser, @Body() dto: CreateSaleDto) {
@@ -22,6 +27,8 @@ export class SalesController {
   }
 
   // /sales/me and /sales/best-sellers MUST come before /sales/:id
+  @ApiOperation({ summary: 'List sales made by the current staff member' })
+  @ApiResponse({ status: 200, description: 'OK' })
   @Get('sales/me')
   @Roles('owner', 'manager', 'stylist')
   async findMine(@Req() req: Request, @CurrentUser() user: AuthUser, @Query() q: SalesQueryDto) {
@@ -29,6 +36,8 @@ export class SalesController {
     return { data, message: 'OK' };
   }
 
+  @ApiOperation({ summary: 'Get best-selling products for the salon' })
+  @ApiResponse({ status: 200, description: 'OK' })
   @Get('sales/best-sellers')
   @Roles('owner', 'manager')
   async bestSellers(@Req() req: Request, @Query() q: BestSellersQueryDto) {
@@ -36,6 +45,8 @@ export class SalesController {
     return { data, message: 'OK' };
   }
 
+  @ApiOperation({ summary: 'List all sales for the salon' })
+  @ApiResponse({ status: 200, description: 'OK' })
   @Get('sales')
   @Roles('owner', 'manager')
   async findAll(@Req() req: Request, @Query() q: SalesQueryDto) {
@@ -43,6 +54,8 @@ export class SalesController {
     return { data, message: 'OK' };
   }
 
+  @ApiOperation({ summary: 'Get a single sale by id' })
+  @ApiResponse({ status: 200, description: 'OK' })
   @Get('sales/:id')
   @Roles('owner', 'manager', 'stylist')
   async findOne(@Req() req: Request, @CurrentUser() user: AuthUser, @Param('id') id: string) {
@@ -50,6 +63,8 @@ export class SalesController {
     return { data, message: 'OK' };
   }
 
+  @ApiOperation({ summary: 'Void a sale, optionally restocking the items' })
+  @ApiResponse({ status: 200, description: 'Vente annulée.' })
   @Delete('sales/:id')
   @Roles('owner')
   async voidSale(

@@ -1,4 +1,5 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Req, Res, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Request, Response } from 'express';
 import { OrdersService, CartCtx } from './orders.service';
 import { AddCartItemDto, CheckoutDto, UpdateCartItemDto, UpdateOrderStatusDto } from './dto/orders.dto';
@@ -13,6 +14,7 @@ const CART_COOKIE = 'cartToken';
 const CART_MAX_AGE = 7 * 24 * 60 * 60 * 1000;
 
 /** Storefront & commandes (Sprint 7). Panier invité cookie httpOnly, checkout pickup-only #5. */
+@ApiTags('Orders')
 @Controller()
 export class OrdersController {
   constructor(private readonly orders: OrdersService) {}
@@ -28,12 +30,16 @@ export class OrdersController {
 
   // ─── Public storefront ─────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'List shop products available for a salon' })
+  @ApiResponse({ status: 200, description: 'OK' })
   @Get('shop/products')
   async shop(@Req() req: Request) {
     const data = await this.orders.shopProducts(getSalonScope(req));
     return { data, message: 'OK' };
   }
 
+  @ApiOperation({ summary: 'Get the current cart (guest cookie or authenticated client)' })
+  @ApiResponse({ status: 200, description: 'OK' })
   @Get('cart')
   @UseGuards(OptionalJwtGuard)
   async getCart(@Req() req: Request, @CurrentUser() user: AuthUser | undefined) {
@@ -41,6 +47,8 @@ export class OrdersController {
     return { data: cart ?? { items: [] }, message: 'OK' };
   }
 
+  @ApiOperation({ summary: 'Add an item to the cart' })
+  @ApiResponse({ status: 201, description: 'Added to cart.' })
   @Post('cart/items')
   @UseGuards(OptionalJwtGuard)
   async addItem(@Req() req: Request, @CurrentUser() user: AuthUser | undefined, @Body() dto: AddCartItemDto, @Res({ passthrough: true }) res: Response) {
@@ -49,6 +57,8 @@ export class OrdersController {
     return { data: cart, message: 'Added to cart.' };
   }
 
+  @ApiOperation({ summary: 'Update the quantity of a cart item' })
+  @ApiResponse({ status: 200, description: 'Updated.' })
   @Patch('cart/items/:productId')
   @UseGuards(OptionalJwtGuard)
   async updateItemQty(@Req() req: Request, @CurrentUser() user: AuthUser | undefined, @Param('productId') productId: string, @Body() dto: UpdateCartItemDto) {
@@ -56,6 +66,8 @@ export class OrdersController {
     return { data, message: 'Updated.' };
   }
 
+  @ApiOperation({ summary: 'Remove an item from the cart' })
+  @ApiResponse({ status: 200, description: 'Removed.' })
   @Delete('cart/items/:productId')
   @UseGuards(OptionalJwtGuard)
   async removeItem(@Req() req: Request, @CurrentUser() user: AuthUser | undefined, @Param('productId') productId: string) {
@@ -63,6 +75,9 @@ export class OrdersController {
     return { data, message: 'Removed.' };
   }
 
+  @ApiOperation({ summary: "Merge a guest cart into the authenticated client's cart" })
+  @ApiResponse({ status: 201, description: 'Cart merged.' })
+  @ApiBearerAuth()
   @Post('cart/merge')
   @UseGuards(JwtGuard, RolesGuard)
   @Roles('client')
@@ -72,6 +87,8 @@ export class OrdersController {
     return { data, message: 'Cart merged.' };
   }
 
+  @ApiOperation({ summary: 'Checkout the cart and place an order (pickup-only)' })
+  @ApiResponse({ status: 201, description: 'Order placed.' })
   @Post('orders')
   @UseGuards(OptionalJwtGuard)
   async checkout(@Req() req: Request, @CurrentUser() user: AuthUser | undefined, @Body() dto: CheckoutDto) {
@@ -79,6 +96,8 @@ export class OrdersController {
     return { data, message: 'Order placed.' };
   }
 
+  @ApiOperation({ summary: 'Track an order by its track token' })
+  @ApiResponse({ status: 200, description: 'OK' })
   @Get('track/order/:trackToken')
   async track(@Req() req: Request, @Param('trackToken') trackToken: string) {
     const data = await this.orders.track(getSalonScope(req), trackToken);
@@ -87,6 +106,9 @@ export class OrdersController {
 
   // ─── Backoffice ──────────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'List orders for the salon (owner/manager)' })
+  @ApiResponse({ status: 200, description: 'OK' })
+  @ApiBearerAuth()
   @Get('orders')
   @UseGuards(JwtGuard, RolesGuard)
   @Roles('owner', 'manager')
@@ -95,6 +117,9 @@ export class OrdersController {
     return { data, message: 'OK' };
   }
 
+  @ApiOperation({ summary: 'Update the status of an order (owner/manager)' })
+  @ApiResponse({ status: 200, description: 'Order updated.' })
+  @ApiBearerAuth()
   @Patch('orders/:id/status')
   @UseGuards(JwtGuard, RolesGuard)
   @Roles('owner', 'manager')

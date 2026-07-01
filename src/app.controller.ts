@@ -1,8 +1,12 @@
 import { Controller, Get } from '@nestjs/common';
+import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
+@ApiTags('App')
 @Controller()
 export class AppController {
   /** Sanity route — démontre l'enveloppe { data, message, statusCode }. */
+  @ApiOperation({ summary: 'Health check sanity route' })
+  @ApiResponse({ status: 200, description: 'Service healthy' })
   @Get('health')
   health(): { data: { status: string; service: string }; message: string } {
     return {

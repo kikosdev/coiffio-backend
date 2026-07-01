@@ -10,6 +10,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { Request } from 'express';
+import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { ClientsService } from './clients.service';
 import { CreateClientDto, ListClientsQueryDto, UpdateClientDto } from './dto/client.dto';
 import { JwtGuard } from '../common/guards/jwt.guard';
@@ -22,12 +23,16 @@ import { ClientDocument } from './schemas/client.schema';
  * CRM (Sprint 2). Matrice : create/edit client = owner·manager·stylist.
  * Toutes les queries passent par getSalonScope() (convention #3). Enveloppe standard.
  */
+@ApiTags('Clients')
+@ApiBearerAuth()
 @Controller('clients')
 @UseGuards(JwtGuard, RolesGuard)
 @Roles('owner', 'manager', 'stylist')
 export class ClientsController {
   constructor(private readonly clients: ClientsService) {}
 
+  @ApiOperation({ summary: 'List clients for the salon, optionally filtered by search query' })
+  @ApiResponse({ status: 200, description: 'OK' })
   @Get()
   async list(
     @Req() req: Request,
@@ -37,6 +42,8 @@ export class ClientsController {
     return { data, message: 'OK' };
   }
 
+  @ApiOperation({ summary: 'Get a single client by id' })
+  @ApiResponse({ status: 200, description: 'OK' })
   @Get(':id')
   async detail(
     @Req() req: Request,
@@ -46,6 +53,8 @@ export class ClientsController {
     return { data, message: 'OK' };
   }
 
+  @ApiOperation({ summary: 'Create a new client' })
+  @ApiResponse({ status: 201, description: 'Client saved.' })
   @Post()
   async create(
     @Req() req: Request,
@@ -55,6 +64,8 @@ export class ClientsController {
     return { data, message: 'Client saved.' };
   }
 
+  @ApiOperation({ summary: 'Update an existing client' })
+  @ApiResponse({ status: 200, description: 'Client updated.' })
   @Patch(':id')
   async update(
     @Req() req: Request,

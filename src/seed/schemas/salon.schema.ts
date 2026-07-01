@@ -48,6 +48,11 @@ export class SalonHoursEntry {
 }
 export const SalonHoursEntrySchema = SchemaFactory.createForClass(SalonHoursEntry);
 
+export interface SalonLocation {
+  type: 'Point';
+  coordinates: [number, number]; // [lng, lat] — ordre GeoJSON strict
+}
+
 @Schema({ timestamps: true })
 export class Salon {
   @Prop({ required: true }) name: string;
@@ -58,6 +63,17 @@ export class Salon {
   @Prop({ default: 'Africa/Tunis' }) timezone: string;
   @Prop({ default: 'TND' }) currency: string;
   @Prop({ default: 19, min: 0, max: 100 }) taxRate: number;
+
+  // Géolocalisation (SKILL_client_home_dynamic — HOME.0). Absent tant que le
+  // salon n'a pas été géocodé (backfill) — jamais fabriqué côté lecture.
+  @Prop({
+    type: {
+      type: { type: String, enum: ['Point'], default: 'Point' },
+      coordinates: { type: [Number], default: undefined },
+    },
+    _id: false,
+  })
+  location?: SalonLocation;
 
   @Prop({
     type: [
@@ -79,3 +95,4 @@ export class Salon {
 
 export const SalonSchema = SchemaFactory.createForClass(Salon);
 SalonSchema.index({ slug: 1 }, { unique: true, sparse: true });
+SalonSchema.index({ location: '2dsphere' });

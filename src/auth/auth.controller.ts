@@ -8,6 +8,7 @@ import {
   Res,
   UseGuards,
 } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Request, Response } from 'express';
 import { AuthService, PublicUser } from './auth.service';
 import {
@@ -28,6 +29,7 @@ import { getSalonScope } from '../common/scope/salon-scope';
 
 const COOKIE_NAME = 'access_token';
 
+@ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
   constructor(private readonly auth: AuthService) {}
@@ -43,6 +45,8 @@ export class AuthController {
     });
   }
 
+  @ApiOperation({ summary: 'Sign in with email/phone + password (client or staff)' })
+  @ApiResponse({ status: 201, description: 'Signed in successfully; sets the access_token cookie.' })
   @Post('login')
   async login(
     @Body() dto: LoginDto,
@@ -53,6 +57,8 @@ export class AuthController {
     return { data: result, message: 'Signed in successfully.' };
   }
 
+  @ApiOperation({ summary: 'Sign in to the POS kiosk with a staff PIN' })
+  @ApiResponse({ status: 201, description: 'Signed in to POS.' })
   @Post('login-pin')
   async loginPin(
     @Body() dto: LoginPinDto,
@@ -61,6 +67,8 @@ export class AuthController {
     return { data, message: 'Signed in to POS.' };
   }
 
+  @ApiOperation({ summary: 'Register a new client account' })
+  @ApiResponse({ status: 201, description: 'Account created successfully; sets the access_token cookie.' })
   @Post('register')
   async register(
     @Body() dto: RegisterDto,
@@ -71,6 +79,8 @@ export class AuthController {
     return { data: result, message: 'Account created successfully.' };
   }
 
+  @ApiOperation({ summary: 'Register a new client account (alias route used by the booking flow)' })
+  @ApiResponse({ status: 201, description: 'Account created successfully; sets the access_token cookie.' })
   @Post('register/client')
   async registerClient(
     @Body() dto: RegisterDto,
@@ -81,6 +91,9 @@ export class AuthController {
     return { data: result, message: 'Account created successfully.' };
   }
 
+  @ApiOperation({ summary: 'Create a staff account for the current salon (owner only)' })
+  @ApiResponse({ status: 201, description: 'Staff account created.' })
+  @ApiBearerAuth()
   @Post('staff')
   @UseGuards(JwtGuard, RolesGuard)
   @Roles('owner')
@@ -93,6 +106,8 @@ export class AuthController {
     return { data, message: 'Staff account created.' };
   }
 
+  @ApiOperation({ summary: 'Request a password reset link/code for an account' })
+  @ApiResponse({ status: 201, description: 'If the account exists, a reset link has been sent.' })
   @Post('password-reset/request')
   async requestReset(
     @Body() dto: PasswordResetRequestDto,
@@ -101,6 +116,8 @@ export class AuthController {
     return { data, message: 'If the account exists, a reset link has been sent.' };
   }
 
+  @ApiOperation({ summary: 'Confirm a password reset using the emailed token' })
+  @ApiResponse({ status: 201, description: 'Password updated. You can now sign in.' })
   @Post('password-reset/confirm')
   async confirmReset(
     @Body() dto: PasswordResetConfirmDto,
@@ -109,6 +126,9 @@ export class AuthController {
     return { data, message: 'Password updated. You can now sign in.' };
   }
 
+  @ApiOperation({ summary: 'Get the currently authenticated user/staff profile' })
+  @ApiResponse({ status: 200, description: 'Current account profile.' })
+  @ApiBearerAuth()
   @Get('me')
   @UseGuards(JwtGuard)
   async me(@CurrentUser() user: AuthUser): Promise<{ data: PublicUser; message: string }> {
@@ -116,6 +136,9 @@ export class AuthController {
     return { data, message: 'OK' };
   }
 
+  @ApiOperation({ summary: 'Update the currently authenticated user/staff profile' })
+  @ApiResponse({ status: 200, description: 'Profile updated.' })
+  @ApiBearerAuth()
   @Patch('me')
   @UseGuards(JwtGuard)
   async updateMe(
@@ -126,6 +149,9 @@ export class AuthController {
     return { data, message: 'Profile updated.' };
   }
 
+  @ApiOperation({ summary: "Change the currently authenticated user's password" })
+  @ApiResponse({ status: 200, description: 'Mot de passe mis à jour.' })
+  @ApiBearerAuth()
   @Patch('me/password')
   @UseGuards(JwtGuard)
   async changePassword(
@@ -136,6 +162,9 @@ export class AuthController {
     return { data: { ok: true }, message: 'Mot de passe mis à jour.' };
   }
 
+  @ApiOperation({ summary: 'Sign out and clear the access_token cookie' })
+  @ApiResponse({ status: 201, description: 'Signed out.' })
+  @ApiBearerAuth()
   @Post('logout')
   @UseGuards(JwtGuard)
   logout(@Res({ passthrough: true }) res: Response): { data: { ok: boolean }; message: string } {

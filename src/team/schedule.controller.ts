@@ -10,6 +10,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Request } from 'express';
 import { ScheduleService } from './schedule.service';
 import { AddOverrideDto, SetWeeklyDto } from './dto/team.dto';
@@ -23,6 +24,8 @@ import { CurrentUser, AuthUser } from '../common/decorators/current-user.decorat
  * Schedule (Sprint 3) — la source de vérité de disponibilité (lue par le booking engine).
  * GET = owner·manager·(stylist=soi) ; éditer la rota / poser un override = owner·manager (matrice).
  */
+@ApiTags('Schedule')
+@ApiBearerAuth()
 @Controller('schedule')
 @UseGuards(JwtGuard, RolesGuard)
 @Roles('owner', 'manager', 'stylist')
@@ -37,12 +40,16 @@ export class ScheduleController {
   }
 
   /** Horaires d'ouverture du salon — utilisé par le frontend pour désactiver les jours fermés. */
+  @ApiOperation({ summary: "Get the salon's opening hours" })
+  @ApiResponse({ status: 200, description: 'OK' })
   @Get('salon-hours')
   async getSalonHours(@Req() req: Request) {
     const data = await this.schedule.getSalonHours(getSalonScope(req));
     return { data, message: 'OK' };
   }
 
+  @ApiOperation({ summary: "Get a stylist's schedule (own schedule only for stylists)" })
+  @ApiResponse({ status: 200, description: 'OK' })
   @Get(':stylistId')
   async get(@Req() req: Request, @CurrentUser() user: AuthUser, @Param('stylistId') stylistId: string) {
     this.assertCanRead(user, stylistId);
@@ -50,6 +57,8 @@ export class ScheduleController {
     return { data, message: 'OK' };
   }
 
+  @ApiOperation({ summary: "Set a stylist's weekly rota (owner/manager only)" })
+  @ApiResponse({ status: 200, description: 'Weekly rota saved.' })
   @Put(':stylistId')
   @Roles('owner', 'manager')
   async setWeekly(@Req() req: Request, @Param('stylistId') stylistId: string, @Body() dto: SetWeeklyDto) {
@@ -57,6 +66,8 @@ export class ScheduleController {
     return { data, message: 'Weekly rota saved.' };
   }
 
+  @ApiOperation({ summary: "Add a schedule override for a stylist (owner/manager only)" })
+  @ApiResponse({ status: 201, description: 'Override added.' })
   @Post(':stylistId/override')
   @Roles('owner', 'manager')
   async addOverride(@Req() req: Request, @Param('stylistId') stylistId: string, @Body() dto: AddOverrideDto) {
@@ -64,6 +75,8 @@ export class ScheduleController {
     return { data, message: 'Override added.' };
   }
 
+  @ApiOperation({ summary: "Remove a schedule override for a stylist (owner/manager only)" })
+  @ApiResponse({ status: 200, description: 'Override removed.' })
   @Delete(':stylistId/override/:date')
   @Roles('owner', 'manager')
   async removeOverride(

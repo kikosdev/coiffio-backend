@@ -141,6 +141,12 @@ export class CancelAppointmentDto {
   token?: string;
 }
 
+export class MineQueryDto {
+  @IsOptional()
+  @IsIn(['upcoming', 'history'])
+  scope?: 'upcoming' | 'history';
+}
+
 export class ListAppointmentsQueryDto {
   @IsOptional()
   @Matches(/^\d{4}-\d{2}-\d{2}$/)
