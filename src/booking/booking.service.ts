@@ -178,8 +178,13 @@ export class BookingService {
     const out: StylistAvailability[] = [];
     for (const stylist of stylists) {
       const schedule = scheduleByStylist.get(stylist._id.toString());
-      if (!schedule) continue;
-      const window = effectiveWindow(schedule.weekly, schedule.overrides, date);
+      // Staff.week is the primary store (cf. ScheduleService) — Schedule.weekly is only a
+      // synced copy written by setWeekly(). Staff created without going through that editor
+      // (seed, direct writes) never get a Schedule doc, which would otherwise make every day
+      // look closed. Fall back to Staff.week so availability doesn't silently die in that case.
+      const weekly = schedule?.weekly?.length ? schedule.weekly : stylist.week;
+      if (!weekly?.length) continue;
+      const window = effectiveWindow(weekly, schedule?.overrides ?? [], date);
       if (!window) continue;
       anyWindow = true;
 
@@ -245,7 +250,12 @@ export class BookingService {
     const { need } = this.totals(services);
 
     const { stylists, profileByUser, scheduleByStylist } = await this.loadStylistContext(scope, dto.stylistId);
-    if (stylists.length === 0) throw new BadRequestException('No stylists available in this salon.');
+    // A specific stylistId that doesn't currently qualify (barber-first path) isn't a client
+    // error — it's a clean "no availability", same as any other closed day. Only a genuinely
+    // staff-less salon (no stylistId filter) is worth surfacing as a hard error.
+    if (stylists.length === 0 && !dto.stylistId) {
+      throw new BadRequestException('No stylists available in this salon.');
+    }
 
     const startDate = dto.startDate ?? todayIso();
     const days = dto.days ?? DEFAULT_TIMELINE_DAYS;
@@ -365,7 +375,13 @@ export class BookingService {
     const appt = await this.insertWithLock(conflictFilter, insertDoc);
 
     // Point d'appel notification BOOKING_CREATED (branché réellement au Sprint 8).
-    if (source === 'online') this.emitBookingCreated(appt);
+    if (source === 'online') {
+      const client = await this.clientModel.findById(clientId).select('name').lean();
+      void this.emitBookingCreated(appt, {
+        clientName: client?.name ?? 'Client',
+        serviceName: services.map((s) => s.name).join(', '),
+      });
+    }
 
     // Lien signé de suivi/annulation (#12) renvoyé au parcours public (BookSummary).
     const manageToken = signAppointment(appt._id.toString());
@@ -442,11 +458,28 @@ export class BookingService {
    * on émettra `BOOKING_CREATED` vers `user:{stylistId}` + badge Schedule owner/manager.
    * Ici : seul le POINT D'APPEL est posé (persist-then-emit réel au Sprint 8).
    */
-  private emitBookingCreated(appt: AppointmentDocument): void {
+  private emitBookingCreated(appt: AppointmentDocument, meta: { clientName: string; serviceName: string }): void {
     // Persist-then-emit (#7) + scoping (#4) : stylist concerné + owner salon-wide.
-    const payload = { appointmentId: appt._id.toString(), start: appt.start, stylistId: appt.stylistId.toString() };
+    const payload = { appointmentId: appt._id.toString(), start: appt.start, stylistId: appt.stylistId.toString(), groupId: appt.groupId };
     void this.notifications.dispatch({ salonId: appt.salonId, userId: appt.stylistId, type: SOCKET_EVENTS.APPOINTMENT_CREATED, payload });
     void this.notifications.dispatch({ salonId: appt.salonId, role: 'owner', type: SOCKET_EVENTS.APPOINTMENT_CREATED, payload });
+    // Broadcast too (SKILL_fix_pos_board_notifications) — the POS kiosk isn't signed in as
+    // any specific user/role that the two dispatches above would reach (bb_pos_token has
+    // neither `sub` nor `role`), so it must join `salon:{id}` directly to see this at all.
+    // Deduplicated by groupId (SKILL_fix_pos_board_notifs_FINAL) — one booking, one notif,
+    // even if createAppointment is ever called more than once for the same groupId.
+    // appt.start is stored UTC-labeled-as-Tunis (dateAtMin convention) — read UTC components
+    // directly, no offset, to match the wall-clock time it actually represents.
+    const hh = String(appt.start.getUTCHours()).padStart(2, '0');
+    const mm = String(appt.start.getUTCMinutes()).padStart(2, '0');
+    void this.notifications.dispatchOnce({
+      salonId: appt.salonId,
+      groupId: appt.groupId,
+      type: SOCKET_EVENTS.APPOINTMENT_CREATED,
+      title: 'New appointment',
+      body: `${meta.clientName} — ${meta.serviceName} at ${hh}:${mm}`,
+      payload,
+    });
   }
 
   // ─── Read / cancel ──────────────────────────────────────────────────────────

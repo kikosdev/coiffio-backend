@@ -1,4 +1,4 @@
-import { Controller, Get, Post, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
@@ -9,6 +9,11 @@ import { StaffProfile, StaffProfileDocument } from './schemas/staff-profile.sche
 import { Service, ServiceDocument } from '../services/schemas/service.schema';
 import { Client, ClientDocument } from '../clients/schemas/client.schema';
 import { Appointment, AppointmentDocument } from '../booking/schemas/appointment.schema';
+import { BookingService } from '../booking/booking.service';
+import { CreateWalkinDto } from '../booking/dto/booking.dto';
+import { dateAtMin, addDaysIso, todayIso } from '../booking/availability.util';
+import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationDocument } from '../notifications/schemas/notification.schema';
 
 interface RosterCard {
   id: string;
@@ -79,6 +84,8 @@ export class PosController {
     @InjectModel(Service.name) private readonly serviceModel: Model<ServiceDocument>,
     @InjectModel(Client.name) private readonly clientModel: Model<ClientDocument>,
     @InjectModel(Appointment.name) private readonly apptModel: Model<AppointmentDocument>,
+    private readonly bookingService: BookingService,
+    private readonly notificationsService: NotificationsService,
   ) { }
 
   @ApiOperation({ summary: 'Get the POS staff roster, on-shift status first' })
@@ -87,7 +94,7 @@ export class PosController {
   async getRoster(
     @CurrentPosUser() caller: PosUser,
   ): Promise<{ data: RosterCard[]; message: string }> {
-    const salonId = new Types.ObjectId(caller.salonId);
+    const salonId = caller.salonId; // String — Mongoose casts on write, but never assume on read
 
     const staffList = await this.staffModel
       .find({ salonId, isActive: true, posEnabled: true })
@@ -183,7 +190,7 @@ export class PosController {
   async getCatalog(
     @CurrentPosUser() caller: PosUser,
   ): Promise<{ data: CatalogItem[]; message: string }> {
-    const salonId = new Types.ObjectId(caller.salonId);
+    const salonId = caller.salonId; // String — Mongoose casts on write, but never assume on read
 
     const services = await this.serviceModel
       .find({ salonId, active: true })
@@ -202,21 +209,28 @@ export class PosController {
     return { data, message: 'OK' };
   }
 
-  @ApiOperation({ summary: "Get today's appointments grouped by waiting/in-chair/done" })
+  @ApiOperation({ summary: "Get a day's appointments grouped by waiting/in-chair/done (defaults to today, Africa/Tunis)" })
   @ApiResponse({ status: 200, description: 'OK' })
   @Get('today')
   async getToday(
     @CurrentPosUser() caller: PosUser,
+    @Query('date') date?: string,
   ): Promise<{ data: TodayAppt[]; message: string }> {
-    const salonId = new Types.ObjectId(caller.salonId);
+    if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      throw new BadRequestException('date must be yyyy-MM-dd.');
+    }
+    const salonId = caller.salonId; // String — Mongoose casts on write, but never assume on read
     const now = new Date();
-    const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
-    const dayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+    const dateStr = date ?? todayIso();
+    // Same UTC-labeled-as-Tunis convention the booking engine uses everywhere (dateAtMin) —
+    // appointment start/end are stored that way, so day boundaries must match it exactly.
+    const dayStart = dateAtMin(dateStr, 0);
+    const dayEnd = dateAtMin(addDaysIso(dateStr, 1), 0);
 
     const appts = await this.apptModel
       .find({
         salonId,
-        start: { $gte: dayStart, $lte: dayEnd },
+        start: { $gte: dayStart, $lt: dayEnd },
         status: { $nin: ['cancelled'] },
       })
       .sort({ start: 1 })
@@ -289,5 +303,44 @@ export class PosController {
     );
     // SWAP: RegisterSession.open(caller.staffId, now) // TODO RegisterSession
     return { data: { ok: true, clockedIn: now.toISOString() }, message: 'Clocked in.' };
+  }
+
+  /**
+   * "Add walk-in" (SKILL_fix_pos_board_notifications, Prompt 5) — walk-ins are appointments
+   * (source:'walkin'), never a separate collection, so they show up on the same board query
+   * as any other appointment. bb_pos_token has no `role`, so this can't reuse
+   * POST /appointments/walkin (JwtGuard + RolesGuard) — same use case, POS-scoped guard.
+   */
+  @ApiOperation({ summary: 'Create a walk-in appointment, starting now' })
+  @ApiResponse({ status: 201, description: 'Walk-in created.' })
+  @Post('walkin')
+  async createWalkin(
+    @CurrentPosUser() caller: PosUser,
+    @Body() dto: CreateWalkinDto,
+  ): Promise<{ data: AppointmentDocument; message: string }> {
+    const data = await this.bookingService.createWalkin({ salonId: caller.salonId }, dto);
+    return { data, message: 'Walk-in created.' };
+  }
+
+  /** Hydrates the POS bell on app restart — the persisted, deduplicated broadcast feed. */
+  @ApiOperation({ summary: 'List the salon-wide notification feed (POS bell history)' })
+  @ApiResponse({ status: 200, description: 'OK' })
+  @Get('notifications')
+  async listNotifications(
+    @CurrentPosUser() caller: PosUser,
+  ): Promise<{ data: NotificationDocument[]; message: string }> {
+    const data = await this.notificationsService.listForSalon(caller.salonId);
+    return { data, message: 'OK' };
+  }
+
+  @ApiOperation({ summary: 'Mark notifications as read by this POS terminal/staff' })
+  @ApiResponse({ status: 200, description: 'OK' })
+  @Patch('notifications/read')
+  async markNotificationsRead(
+    @CurrentPosUser() caller: PosUser,
+    @Body() body: { ids?: string[] },
+  ): Promise<{ data: { updated: number }; message: string }> {
+    const data = await this.notificationsService.markReadByReader(caller.salonId, caller.staffId, body?.ids);
+    return { data, message: 'OK' };
   }
 }

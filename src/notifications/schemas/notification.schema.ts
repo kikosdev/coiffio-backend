@@ -25,8 +25,32 @@ export class Notification {
 
   @Prop({ required: true, index: true })
   date: Date;
+
+  // ── Shared-terminal broadcasts (SKILL_fix_pos_board_notifs_FINAL) ──────────
+  // groupId = dedup key (1 booking = 1 notif, even if it spans several appointment
+  // rows). title/body are precomputed human text so GET /pos/notifications doesn't
+  // need to re-populate client/service names on every read.
+  @Prop()
+  groupId?: string;
+
+  @Prop()
+  title?: string;
+
+  @Prop()
+  body?: string;
+
+  // Readers who've acknowledged this notif (POS terminals share one feed — a
+  // singular `read` boolean can't represent "seen at this terminal, not at that one").
+  @Prop({ type: [String], default: [] })
+  readBy: string[];
 }
 
 export const NotificationSchema = SchemaFactory.createForClass(Notification);
 NotificationSchema.index({ salonId: 1, userId: 1, read: 1 });
 NotificationSchema.index({ salonId: 1, role: 1, read: 1 });
+// Makes duplicate broadcasts for the same booking impossible at the DB level, not
+// just best-effort in application code.
+NotificationSchema.index(
+  { salonId: 1, type: 1, groupId: 1 },
+  { unique: true, partialFilterExpression: { groupId: { $exists: true } } },
+);

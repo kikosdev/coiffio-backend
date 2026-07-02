@@ -10,6 +10,22 @@ import { PublicService } from './public.service';
 export class PublicController {
   constructor(private readonly publicService: PublicService) {}
 
+  @ApiOperation({ summary: 'List all salons — discovery, no geolocation required' })
+  @ApiResponse({ status: 200, description: 'OK' })
+  @Get()
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @UseGuards(ThrottlerGuard)
+  listAll() {
+    return this.publicService.listAll();
+  }
+
+  @ApiOperation({ summary: 'Get a single salon profile card by its Mongo _id' })
+  @ApiResponse({ status: 200, description: 'OK' })
+  @Get(':id')
+  getOne(@Param('id') id: string) {
+    return this.publicService.getOne(id);
+  }
+
   @ApiOperation({ summary: 'Get public landing page data for a salon by slug' })
   @ApiResponse({ status: 200, description: 'OK' })
   @Get(':salonSlug/landing')

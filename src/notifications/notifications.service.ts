@@ -10,7 +10,19 @@ export interface DispatchInput {
   salonId: Types.ObjectId | string;
   userId?: Types.ObjectId | string;
   role?: string;
+  /** Also emit to `salon:{id}` — e.g. the POS board, which isn't any one user/role. */
+  broadcast?: boolean;
   type: string;
+  payload?: Record<string, unknown>;
+}
+
+export interface DispatchOnceInput {
+  salonId: Types.ObjectId | string;
+  /** Dedup key — one booking (possibly several appointment rows) = one notification. */
+  groupId: string;
+  type: string;
+  title: string;
+  body: string;
   payload?: Record<string, unknown>;
 }
 
@@ -37,7 +49,37 @@ export class NotificationsService {
     });
     if (input.userId) this.gateway.emitToRoom(`user:${input.userId.toString()}`, input.type, notif);
     if (input.role) this.gateway.emitToRoom(`role:${input.role}`, input.type, notif);
+    if (input.broadcast) this.gateway.emitToRoom(`salon:${input.salonId.toString()}`, input.type, notif);
     return notif;
+  }
+
+  /**
+   * Broadcast déduplié (Prompt 2, SKILL_fix_pos_board_notifs_FINAL) — upsert sur
+   * (salonId, type, groupId) : la contrainte d'unicité en base rend le doublon
+   * impossible même si appelé plusieurs fois pour le même booking (ex. multi-service).
+   * N'émet sur le socket QUE lors d'un véritable premier insert.
+   */
+  async dispatchOnce(input: DispatchOnceInput): Promise<void> {
+    const filter = { salonId: new Types.ObjectId(input.salonId), type: input.type, groupId: input.groupId };
+    const res = await this.model.updateOne(
+      filter,
+      {
+        $setOnInsert: {
+          ...filter,
+          title: input.title,
+          body: input.body,
+          payload: input.payload ?? {},
+          read: false,
+          readBy: [],
+          date: new Date(),
+        },
+      },
+      { upsert: true },
+    );
+    if (res.upsertedCount > 0) {
+      const notif = await this.model.findOne(filter);
+      this.gateway.emitToRoom(`salon:${input.salonId.toString()}`, input.type, notif);
+    }
   }
 
   /** Liste scopée : userId == soi OU role match (#4). */
@@ -68,6 +110,26 @@ export class NotificationsService {
       { salonId: scope.salonId, read: false, $or: [{ userId: new Types.ObjectId(user.sub) }, { role: user.role }] },
       { $set: { read: true } },
     );
+    return { updated: res.modifiedCount ?? 0 };
+  }
+
+  /**
+   * POS history feed (Prompt 2, SKILL_fix_pos_board_notifs_FINAL) — the whole salon-wide
+   * broadcast feed, not scoped to a specific user/role like `list()` above. Hydrates the
+   * kiosk's bell on app restart.
+   */
+  async listForSalon(salonId: string): Promise<NotificationDocument[]> {
+    return this.model
+      .find({ salonId: new Types.ObjectId(salonId), groupId: { $exists: true } })
+      .sort({ date: -1 })
+      .limit(50);
+  }
+
+  /** Marks broadcasts as seen by this specific POS terminal/staff — shared feed, per-reader ack. */
+  async markReadByReader(salonId: string, readerId: string, ids?: string[]): Promise<{ updated: number }> {
+    const filter: Record<string, unknown> = { salonId: new Types.ObjectId(salonId) };
+    if (ids?.length) filter._id = { $in: ids };
+    const res = await this.model.updateMany(filter, { $addToSet: { readBy: readerId } });
     return { updated: res.modifiedCount ?? 0 };
   }
 }

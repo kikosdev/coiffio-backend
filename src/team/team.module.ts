@@ -17,11 +17,13 @@ import { LeaveController } from './leave.controller';
 import { PosController } from './pos.controller';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { AuthModule } from '../auth/auth.module';
+import { BookingModule } from '../booking/booking.module';
 
 @Module({
   imports: [
     NotificationsModule,
     AuthModule,
+    BookingModule,
     MongooseModule.forFeature([
       { name: Staff.name,        schema: StaffSchema },
       { name: Schedule.name,     schema: ScheduleSchema },

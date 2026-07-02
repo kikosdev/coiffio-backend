@@ -1,12 +1,25 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, Types } from 'mongoose';
 import { Salon, SalonDocument } from '../seed/schemas/salon.schema';
 import { Service, ServiceDocument } from '../services/schemas/service.schema';
 import { Staff, StaffDocument } from '../team/schemas/staff.schema';
 import { StaffProfile, StaffProfileDocument } from '../team/schemas/staff-profile.schema';
 import { Client, ClientDocument } from '../clients/schemas/client.schema';
 import { Testimonial, TestimonialDocument } from './schemas/testimonial.schema';
+import { computeSalonIsOpen } from '../common/time/salon-clock';
+
+const MAX_LIST_SALONS = 100;
+
+export interface PublicSalonSummary {
+  id: string;
+  slug: string;
+  name: string;
+  address: string;
+  coverImage: string | null;
+  rating: number | null;
+  isOpen: boolean | null;
+}
 
 @Injectable()
 export class PublicService {
@@ -36,6 +49,47 @@ export class PublicService {
     }
 
     throw new NotFoundException('Salon not found');
+  }
+
+  /**
+   * Discovery-only cross-salon list (SKILL_home_list_all_salons) — deliberately not scoped
+   * via getSalonScope(). No `isActive` field exists on Salon today, so every seeded salon
+   * is returned; add that filter once the field lands rather than fabricating it here.
+   */
+  async listAll(): Promise<PublicSalonSummary[]> {
+    const salons = await this.salonModel
+      .find({})
+      .sort({ name: 1 })
+      .limit(MAX_LIST_SALONS)
+      .select('slug name address businessHours')
+      .lean();
+
+    return salons.map((s) => ({
+      id: String((s as any)._id),
+      slug: s.slug ?? '',
+      name: s.name,
+      address: s.address ?? '',
+      coverImage: null, // pas de champ image sur Salon aujourd'hui
+      rating: null, // pas de collection reviews aujourd'hui
+      isOpen: computeSalonIsOpen(s),
+    }));
+  }
+
+  /** Single-salon profile card (SKILL_fix_booking_real_staff_availability) — by Mongo _id. */
+  async getOne(id: string): Promise<PublicSalonSummary> {
+    if (!Types.ObjectId.isValid(id)) throw new NotFoundException('Salon not found');
+    const s = await this.salonModel.findById(id).select('slug name address businessHours').lean();
+    if (!s) throw new NotFoundException('Salon not found');
+
+    return {
+      id: String((s as any)._id),
+      slug: s.slug ?? '',
+      name: s.name,
+      address: s.address ?? '',
+      coverImage: null,
+      rating: null,
+      isOpen: computeSalonIsOpen(s),
+    };
   }
 
   async getLanding(slug: string) {
