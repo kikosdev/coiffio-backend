@@ -141,6 +141,10 @@ export class BookingService {
       salonId: scope.salonId,
       role: { $in: ['stylist', 'colorist'] },
       isActive: true,
+      // $ne (not === true): pre-existing Staff docs stored before this field existed have no
+      // value at all for it — Mongoose's schema default only applies to new/hydrated docs, not
+      // to raw query matching, so `acceptingBookings: true` would silently exclude them all.
+      acceptingBookings: { $ne: false },
     };
     if (stylistId) stylistFilter._id = stylistId;
     const stylists = await this.staffModel.find(stylistFilter).sort({ name: 1 });

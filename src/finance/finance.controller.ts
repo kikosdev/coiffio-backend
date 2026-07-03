@@ -2,7 +2,7 @@ import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, Res, Use
 import { Request, Response } from 'express';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { FinanceService, Period } from './finance.service';
-import { CreatePaymentDto, CreateExpenseDto, UpdateExpenseDto, ReportsQueryDto } from './dto/finance.dto';
+import { CreatePaymentDto, CreateExpenseDto, UpdateExpenseDto, ReportsQueryDto, EarningsQueryDto } from './dto/finance.dto';
 import { JwtGuard } from '../common/guards/jwt.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -35,6 +35,15 @@ export class FinanceController {
   @Roles('owner', 'manager', 'stylist')
   async myCaisse(@Req() req: Request, @CurrentUser() user: AuthUser) {
     const data = await this.finance.myCaisse(getSalonScope(req), user);
+    return { data, message: 'OK' };
+  }
+
+  @ApiOperation({ summary: "Get the current staff member's own earnings for a given period, with a by-service breakdown and chart bars" })
+  @ApiResponse({ status: 200, description: 'OK' })
+  @Get('earnings/me')
+  @Roles('owner', 'manager', 'stylist')
+  async myEarnings(@Req() req: Request, @CurrentUser() user: AuthUser, @Query() query: EarningsQueryDto) {
+    const data = await this.finance.myEarnings(getSalonScope(req), user, query.period ?? 'week');
     return { data, message: 'OK' };
   }
 

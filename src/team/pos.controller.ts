@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, NotFoundException, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
@@ -14,6 +14,8 @@ import { CreateWalkinDto } from '../booking/dto/booking.dto';
 import { dateAtMin, addDaysIso, todayIso } from '../booking/availability.util';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationDocument } from '../notifications/schemas/notification.schema';
+import { FinanceService } from '../finance/finance.service';
+import { PosPayDto } from './dto/team.dto';
 
 interface RosterCard {
   id: string;
@@ -73,6 +75,35 @@ interface TodayAppt {
   column: 'waiting' | 'in_chair' | 'done';
 }
 
+interface PosApptDetail {
+  id: string;
+  status: string;
+  source: string;
+  start: string;
+  end: string;
+  price: number;
+  deposit: number | null;
+  checkedInAt: string | null;
+  column: 'waiting' | 'in_chair' | 'done';
+  client: { name: string; phone: string; email: string };
+  stylist: { name: string; color: string };
+  services: { id: string; name: string; price: number; durationMin: number }[];
+}
+
+// Shared by getToday() and getAppointmentDetail() — a manual check-in pins the card
+// to "in chair" regardless of the scheduled window; otherwise it's purely time-derived.
+function computeColumn(
+  status: string,
+  start: Date,
+  end: Date,
+  checkedInAt: Date | undefined,
+  now: Date,
+): 'waiting' | 'in_chair' | 'done' {
+  if (status === 'completed') return 'done';
+  if (checkedInAt || (start <= now && end >= now)) return 'in_chair';
+  return 'waiting';
+}
+
 @ApiTags('POS')
 @ApiBearerAuth()
 @Controller('pos')
@@ -86,6 +117,7 @@ export class PosController {
     @InjectModel(Appointment.name) private readonly apptModel: Model<AppointmentDocument>,
     private readonly bookingService: BookingService,
     private readonly notificationsService: NotificationsService,
+    private readonly financeService: FinanceService,
   ) { }
 
   @ApiOperation({ summary: 'Get the POS staff roster, on-shift status first' })
@@ -261,14 +293,7 @@ export class PosController {
         const parts = (member?.name ?? '—').split(' ');
         const initials = parts.map((p: string) => p.charAt(0).toUpperCase()).join('').slice(0, 2);
 
-        let column: 'waiting' | 'in_chair' | 'done';
-        if (a.status === 'completed') {
-          column = 'done';
-        } else if (a.start <= now && a.end >= now) {
-          column = 'in_chair';
-        } else {
-          column = 'waiting';
-        }
+        const column = computeColumn(a.status, a.start, a.end, a.checkedInAt, now);
 
         return {
           id: a._id.toString(),
@@ -288,6 +313,114 @@ export class PosController {
       .filter((a) => a.column !== undefined) as TodayAppt[];
 
     return { data, message: 'OK' };
+  }
+
+  @ApiOperation({ summary: 'Get full detail for a single appointment (POS)' })
+  @ApiResponse({ status: 200, description: 'OK' })
+  @Get('appointments/:id')
+  async getAppointmentDetail(
+    @CurrentPosUser() caller: PosUser,
+    @Param('id') id: string,
+  ): Promise<{ data: PosApptDetail; message: string }> {
+    const salonId = caller.salonId; // String — Mongoose casts on write, but never assume on read
+    const appt = await this.apptModel.findOne({ _id: id, salonId }).lean();
+    if (!appt) throw new NotFoundException('Appointment not found.');
+
+    const [client, services, stylist] = await Promise.all([
+      this.clientModel.findById(appt.clientId).select('name phone email').lean(),
+      this.serviceModel.find({ _id: { $in: appt.services } }).select('name price durationMin').lean(),
+      this.staffModel.findById(appt.stylistId).select('name color').lean(),
+    ]);
+
+    return {
+      data: {
+        id: appt._id.toString(),
+        status: appt.status,
+        source: appt.source,
+        start: appt.start.toISOString(),
+        end: appt.end.toISOString(),
+        price: appt.price ?? 0,
+        deposit: appt.deposit ?? null,
+        checkedInAt: appt.checkedInAt ? appt.checkedInAt.toISOString() : null,
+        column: computeColumn(appt.status, appt.start, appt.end, appt.checkedInAt, new Date()),
+        client: {
+          name: client?.name ?? (appt.source === 'walkin' ? 'Walk-in' : '—'),
+          phone: client?.phone ?? '',
+          email: client?.email ?? '',
+        },
+        stylist: { name: stylist?.name ?? '—', color: stylist?.color ?? '#B89968' },
+        services: services.map((s) => ({
+          id: (s._id as Types.ObjectId).toString(),
+          name: s.name,
+          price: s.price,
+          durationMin: s.durationMin,
+        })),
+      },
+      message: 'OK',
+    };
+  }
+
+  @ApiOperation({ summary: 'Check a client in — pins the card to "in chair" regardless of scheduled time' })
+  @ApiResponse({ status: 201, description: 'Checked in.' })
+  @Post('appointments/:id/check-in')
+  async checkIn(
+    @CurrentPosUser() caller: PosUser,
+    @Param('id') id: string,
+  ): Promise<{ data: { ok: boolean; checkedInAt: string }; message: string }> {
+    const salonId = caller.salonId;
+    const appt = await this.apptModel.findOne({ _id: id, salonId });
+    if (!appt) throw new NotFoundException('Appointment not found.');
+    if (appt.status === 'completed' || appt.status === 'cancelled') {
+      throw new BadRequestException('This appointment is already closed.');
+    }
+    if (!appt.checkedInAt) {
+      appt.checkedInAt = new Date();
+      await appt.save();
+    }
+    return { data: { ok: true, checkedInAt: appt.checkedInAt.toISOString() }, message: 'Checked in.' };
+  }
+
+  @ApiOperation({ summary: 'Record payment for an appointment and mark it completed (cash/card)' })
+  @ApiResponse({ status: 201, description: 'Paid.' })
+  @Post('appointments/:id/pay')
+  async payAppointment(
+    @CurrentPosUser() caller: PosUser,
+    @Param('id') id: string,
+    @Body() dto: PosPayDto,
+  ): Promise<{ data: { ok: boolean }; message: string }> {
+    const salonId = caller.salonId;
+    const appt = await this.apptModel.findOne({ _id: id, salonId }).lean();
+    if (!appt) throw new NotFoundException('Appointment not found.');
+    if (appt.status === 'completed') throw new BadRequestException('This appointment is already paid.');
+    if (appt.status === 'cancelled') throw new BadRequestException('This appointment was cancelled.');
+
+    const services = await this.serviceModel
+      .find({ _id: { $in: appt.services } })
+      .select('name price')
+      .lean();
+
+    const items = services.map((s) => ({
+      kind: 'service' as const,
+      refId: (s._id as Types.ObjectId).toString(),
+      name: s.name,
+      qty: 1,
+      unitPrice: s.price,
+    }));
+    if (items.length === 0) {
+      items.push({ kind: 'service', refId: id, name: 'Service', qty: 1, unitPrice: appt.price ?? 0 });
+    }
+
+    await this.financeService.createPayment(
+      { salonId },
+      {
+        appointmentId: id,
+        stylistId: appt.stylistId.toString(),
+        items,
+        method: dto.method,
+      },
+    );
+
+    return { data: { ok: true }, message: 'Paid.' };
   }
 
   @ApiOperation({ summary: 'Clock in the current POS staff member' })

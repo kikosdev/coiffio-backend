@@ -16,6 +16,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { SOCKET_EVENTS } from '../common/socket-events';
 
 export type Period = 'day' | 'week' | 'month';
+export type EarningsPeriod = 'week' | 'month' | 'year';
 
 export interface CaisseTotals {
   count: number;
@@ -206,6 +207,80 @@ export class FinanceService {
     };
   }
 
+  // ─── Earnings (staff self-service — GET /finance/earnings/me) ─────────────────
+
+  /** Same-length range immediately preceding `range`, for the period-over-period changePct. */
+  private priorRange(range: { from: Date; to: Date }): { from: Date; to: Date } {
+    const spanMs = range.to.getTime() - range.from.getTime();
+    return { from: new Date(range.from.getTime() - spanMs - 1), to: new Date(range.from.getTime() - 1) };
+  }
+
+  private earningsRange(period: EarningsPeriod, ref = new Date()): { from: Date; to: Date } {
+    const to = new Date(ref);
+    to.setUTCHours(23, 59, 59, 999);
+    const from = new Date(ref);
+    from.setUTCHours(0, 0, 0, 0);
+    if (period === 'week') from.setUTCDate(from.getUTCDate() - 6);
+    if (period === 'month') from.setUTCDate(1);
+    if (period === 'year') { from.setUTCMonth(0, 1); }
+    return { from, to };
+  }
+
+  private bucketKey(period: EarningsPeriod, date: Date): string {
+    if (period === 'year') return date.toISOString().slice(0, 7); // 'YYYY-MM'
+    if (period === 'month') {
+      const dayOfMonth = date.getUTCDate();
+      return `W${Math.ceil(dayOfMonth / 7)}`; // 'W1'..'W5'
+    }
+    return date.toISOString().slice(0, 10); // 'YYYY-MM-DD'
+  }
+
+  async myEarnings(scope: SalonScope, user: AuthUser, period: EarningsPeriod): Promise<{
+    period: EarningsPeriod;
+    totalTnd: number;
+    changePct: number;
+    byService: { service: string; totalTnd: number; count: number; pct: number }[];
+    chartBars: { bucket: string; valueTnd: number }[];
+  }> {
+    const range = this.earningsRange(period);
+    const prior = this.priorRange(range);
+    const stylistId = new Types.ObjectId(user.staffId ?? user.sub);
+
+    const [payments, priorPayments] = await Promise.all([
+      this.paymentModel.find({ salonId: scope.salonId, stylistId, refunded: false, date: { $gte: range.from, $lte: range.to } }),
+      this.paymentModel.find({ salonId: scope.salonId, stylistId, refunded: false, date: { $gte: prior.from, $lte: prior.to } }),
+    ]);
+
+    const totalTnd = payments.reduce((a, p) => a + p.amount, 0);
+    const priorTotalTnd = priorPayments.reduce((a, p) => a + p.amount, 0);
+    const changePct = priorTotalTnd === 0 ? (totalTnd > 0 ? 100 : 0) : Math.round(((totalTnd - priorTotalTnd) / priorTotalTnd) * 100);
+
+    const byServiceMap = new Map<string, { totalTnd: number; count: number }>();
+    for (const p of payments) {
+      for (const line of p.items.filter((i) => i.kind === 'service')) {
+        const g = byServiceMap.get(line.name) ?? { totalTnd: 0, count: 0 };
+        g.totalTnd += line.qty * line.unitPrice;
+        g.count += line.qty;
+        byServiceMap.set(line.name, g);
+      }
+    }
+    const maxServiceTnd = Math.max(1, ...Array.from(byServiceMap.values()).map((v) => v.totalTnd));
+    const byService = Array.from(byServiceMap.entries())
+      .map(([service, v]) => ({ service, totalTnd: v.totalTnd, count: v.count, pct: Math.round((v.totalTnd / maxServiceTnd) * 100) }))
+      .sort((a, b) => b.totalTnd - a.totalTnd);
+
+    const bucketMap = new Map<string, number>();
+    for (const p of payments) {
+      const key = this.bucketKey(period, p.date);
+      bucketMap.set(key, (bucketMap.get(key) ?? 0) + p.amount);
+    }
+    const chartBars = Array.from(bucketMap.entries())
+      .map(([bucket, valueTnd]) => ({ bucket, valueTnd }))
+      .sort((a, b) => a.bucket.localeCompare(b.bucket));
+
+    return { period, totalTnd, changePct, byService, chartBars };
+  }
+
   async myCaisse(scope: SalonScope, user: AuthUser): Promise<{ payments: PaymentDocument[]; totals: CaisseTotals }> {
     const { from, to } = this.periodRange('day');
     const payments = await this.paymentModel
@@ -301,10 +376,12 @@ export class FinanceService {
   async report(scope: SalonScope, period: Period): Promise<{
     period: Period;
     revenue: number;
+    revenueChangePct: number;
     tips: number;
     expenses: number;
     net: number;
     salesCount: number;
+    byStylist: { stylistId: string; name: string; revenue: number }[];
   }> {
     const { from, to } = this.periodRange(period);
     const sales = await this.saleModel.find({ salonId: scope.salonId, date: { $gte: from, $lte: to } });
@@ -317,7 +394,25 @@ export class FinanceService {
     const revenue = sales.reduce((a, s) => a + s.total, 0);
     const tips = payments.reduce((a, p) => a + p.tip, 0);
     const exp = expenses.reduce((a, e) => a + e.amount, 0);
-    return { period, revenue, tips, expenses: exp, net: revenue + tips - exp, salesCount: sales.length };
+
+    const prior = this.priorRange({ from, to });
+    const priorSales = await this.saleModel.find({ salonId: scope.salonId, date: { $gte: prior.from, $lte: prior.to } });
+    const priorRevenue = priorSales.reduce((a, s) => a + s.total, 0);
+    const revenueChangePct = priorRevenue === 0 ? (revenue > 0 ? 100 : 0) : Math.round(((revenue - priorRevenue) / priorRevenue) * 100);
+
+    const stylists = await this.staffModel.find({ salonId: scope.salonId, role: { $in: ['owner', 'manager', 'stylist', 'colorist'] } });
+    const nameOf = new Map(stylists.map((s) => [s._id.toString(), s.name]));
+    const revByStylist = new Map<string, number>();
+    for (const s of sales) {
+      if (!s.stylistId) continue;
+      const id = s.stylistId.toString();
+      revByStylist.set(id, (revByStylist.get(id) ?? 0) + s.total);
+    }
+    const byStylist = [...revByStylist.entries()]
+      .map(([stylistId, revenue]) => ({ stylistId, name: nameOf.get(stylistId) ?? '—', revenue }))
+      .sort((a, b) => b.revenue - a.revenue);
+
+    return { period, revenue, revenueChangePct, tips, expenses: exp, net: revenue + tips - exp, salesCount: sales.length, byStylist };
   }
 
   async exportCsv(scope: SalonScope, period: Period): Promise<string> {

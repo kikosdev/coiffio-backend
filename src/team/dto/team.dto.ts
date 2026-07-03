@@ -1,6 +1,7 @@
 import { Type } from 'class-transformer';
 import {
   IsArray,
+  IsBoolean,
   IsHexColor,
   IsIn,
   IsInt,
@@ -121,6 +122,16 @@ export class UpdateStaffDto {
   @Min(0)
   @Max(100)
   commissionPct?: number;
+}
+
+export class SetAcceptingBookingsDto {
+  @IsBoolean()
+  acceptingBookings: boolean;
+}
+
+export class PosPayDto {
+  @IsIn(['cash', 'card'])
+  method: 'cash' | 'card';
 }
 
 // ─── Schedule (weekly rota + overrides) ──────────────────────────────────────

@@ -18,12 +18,14 @@ import { PosController } from './pos.controller';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { AuthModule } from '../auth/auth.module';
 import { BookingModule } from '../booking/booking.module';
+import { FinanceModule } from '../finance/finance.module';
 
 @Module({
   imports: [
     NotificationsModule,
     AuthModule,
     BookingModule,
+    FinanceModule,
     MongooseModule.forFeature([
       { name: Staff.name,        schema: StaffSchema },
       { name: Schedule.name,     schema: ScheduleSchema },

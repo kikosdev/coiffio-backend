@@ -12,6 +12,8 @@ export interface NearbySalon {
   distanceKm: number | null;
   rating: number | null;
   isOpen: boolean | null;
+  lat: number | null;
+  lng: number | null;
 }
 
 const MAX_RESULTS = 20;
@@ -50,6 +52,8 @@ export class SalonsService {
       distanceKm: distanceMeters == null ? null : Math.round((distanceMeters / 1000) * 10) / 10,
       rating: null, // pas de collection reviews aujourd'hui (DH-3)
       isOpen: computeSalonIsOpen(s),
+      lat: s.location?.coordinates?.[1] ?? null,
+      lng: s.location?.coordinates?.[0] ?? null,
     });
 
     return [

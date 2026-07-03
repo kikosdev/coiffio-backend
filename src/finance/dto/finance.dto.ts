@@ -36,3 +36,7 @@ export class UpdateExpenseDto {
 export class ReportsQueryDto {
   @IsOptional() @IsIn(['day', 'week', 'month']) period?: 'day' | 'week' | 'month';
 }
+
+export class EarningsQueryDto {
+  @IsOptional() @IsIn(['week', 'month', 'year']) period?: 'week' | 'month' | 'year';
+}

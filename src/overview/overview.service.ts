@@ -20,10 +20,13 @@ export interface OverviewResult {
   arc: { hour: number; count: number }[];
   kpis: {
     revenue: number;
+    revenueChangePct: number;
     appointments: { booked: number; done: number; noShow: number };
     walkins: number;
     occupancyPct: number;
     tips: number;
+    barbersOn: number;
+    barbersTotal: number;
   };
   alerts: {
     lowStock: { productId: string; name: string; stock: number; lowStockAt: number }[];
@@ -87,13 +90,17 @@ export class OverviewService {
     const busyMin = appts
       .filter((a) => a.status !== 'cancelled')
       .reduce((acc, a) => acc + (a.end.getTime() - a.start.getTime()) / 60000, 0);
-    const stylists = await this.staffModel.find({ salonId: scope.salonId, role: 'stylist', isActive: true });
+    // Chair-occupying staff = stylist ∪ colorist (booking.service.ts's convention — colorists
+    // are bookable staff too, never exclude them from a "staff on chair" style count).
+    const stylists = await this.staffModel.find({ salonId: scope.salonId, role: { $in: ['stylist', 'colorist'] }, isActive: true });
     let availMin = 0;
+    let barbersOn = 0;
     for (const st of stylists) {
       const sched = await this.scheduleModel.findOne({ salonId: scope.salonId, stylistId: st._id });
       if (!sched) continue;
       const win = effectiveWindow(sched.weekly, sched.overrides, date);
       if (!win) continue;
+      barbersOn += 1;
       const breakMin = win.breaks.reduce((a, b) => a + (b.end - b.start), 0);
       availMin += win.end - win.start - breakMin;
     }
@@ -104,6 +111,13 @@ export class OverviewService {
     const revenue = sales.reduce((a, s) => a + s.total, 0);
     const payments = await this.paymentModel.find({ salonId: scope.salonId, date: { $gte: dayStart, $lte: dayEnd }, refunded: false });
     const tips = payments.reduce((a, p) => a + p.tip, 0);
+
+    // Revenue vs. the prior day, for the HQ "▲X%" chip.
+    const prevDayStart = new Date(dayStart.getTime() - 24 * 60 * 60 * 1000);
+    const prevDayEnd = new Date(dayEnd.getTime() - 24 * 60 * 60 * 1000);
+    const prevSales = await this.saleModel.find({ salonId: scope.salonId, date: { $gte: prevDayStart, $lte: prevDayEnd } });
+    const prevRevenue = prevSales.reduce((a, s) => a + s.total, 0);
+    const revenueChangePct = prevRevenue === 0 ? (revenue > 0 ? 100 : 0) : Math.round(((revenue - prevRevenue) / prevRevenue) * 100);
 
     // Alertes.
     const lowStockDocs = await this.productModel
@@ -180,7 +194,16 @@ export class OverviewService {
 
     return {
       arc,
-      kpis: { revenue, appointments: { booked, done, noShow }, walkins, occupancyPct, tips },
+      kpis: {
+        revenue,
+        revenueChangePct,
+        appointments: { booked, done, noShow },
+        walkins,
+        occupancyPct,
+        tips,
+        barbersOn,
+        barbersTotal: stylists.length,
+      },
       alerts: { lowStock, pendingOrders, leaveRequests },
       topStylists,
       todayAppointments,

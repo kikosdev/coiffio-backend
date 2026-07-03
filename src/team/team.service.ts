@@ -9,6 +9,7 @@ import { Appointment, AppointmentDocument } from '../booking/schemas/appointment
 import { UpdateStaffDto } from './dto/team.dto';
 import { SalonScope } from '../common/scope/salon-scope';
 import { AuthUser } from '../common/decorators/current-user.decorator';
+import { effectiveWindow } from '../booking/availability.util';
 
 const MANAGERS = ['owner', 'manager'];
 const MS_PER_MIN = 60_000;
@@ -21,6 +22,7 @@ export interface PublicStaff {
   role: string;
   color: string;
   isActive: boolean;
+  acceptingBookings: boolean;
   level?: string;
   capabilities?: string[];
   baseRate?: number;
@@ -33,6 +35,7 @@ export interface StylistStanding {
   level: string;
   baseRate: number;
   commissionPct: number;
+  acceptingBookings: boolean;
   upcomingShifts: { date: string; start: string; end: string }[];
   completedCount: number;
   upcomingCount: number;
@@ -59,6 +62,7 @@ export class TeamService {
       role:     s.role,
       color:    s.color,
       isActive: s.isActive,
+      acceptingBookings: s.acceptingBookings,
     };
     if (profile) {
       base.level = profile.level;
@@ -178,6 +182,7 @@ export class TeamService {
       level:              profile?.level ?? 'senior',
       baseRate:           profile?.baseRate ?? 0,
       commissionPct,
+      acceptingBookings:  me.acceptingBookings,
       upcomingShifts,
       completedCount:     completed.length,
       upcomingCount:      upcoming,
@@ -185,5 +190,70 @@ export class TeamService {
       estimatedCommission,
       tips: 0,
     };
+  }
+
+  // ─── Per-barber stats (owner/manager — GET /team/:id/stats) ──────────────────
+
+  /**
+   * This week's revenue + completed-cut count, plus a 7-day chair-utilisation array
+   * (booked minutes / scheduled-available minutes, per day). No `yearsExp` here — there is
+   * no seniority/tenure field anywhere on Staff/StaffProfile, so it isn't fabricated.
+   */
+  async staffStats(scope: SalonScope, id: string): Promise<{
+    stylistId: string;
+    weekRevenueTnd: number;
+    weekCuts: number;
+    weekUtil: { date: string; pct: number }[];
+  }> {
+    const staff = await this.staffModel.findOne({ _id: id, salonId: scope.salonId });
+    if (!staff) throw new NotFoundException('Staff member not found.');
+
+    const schedule = await this.scheduleModel.findOne({ salonId: scope.salonId, stylistId: staff._id });
+    const weekly = staff.week ?? [];
+    const overrides = schedule?.overrides ?? [];
+
+    const now = new Date();
+    const monday = new Date(now);
+    const dow = (monday.getUTCDay() + 6) % 7; // 0=Mon … 6=Sun
+    monday.setUTCDate(monday.getUTCDate() - dow);
+    monday.setUTCHours(0, 0, 0, 0);
+
+    const weekUtil: { date: string; pct: number }[] = [];
+    let weekRevenueTnd = 0;
+    let weekCuts = 0;
+
+    for (let i = 0; i < 7; i += 1) {
+      const dayStart = new Date(monday.getTime() + i * 24 * 60 * MS_PER_MIN);
+      const dayEnd = new Date(dayStart.getTime() + 24 * 60 * MS_PER_MIN);
+      const date = dayStart.toISOString().slice(0, 10);
+
+      const window = effectiveWindow(weekly, overrides, date);
+      const availableMin = window ? window.end - window.start : 0;
+
+      const appts = await this.apptModel.find({
+        salonId: scope.salonId,
+        stylistId: staff._id,
+        status: { $in: ['booked', 'confirmed', 'completed'] },
+        start: { $lt: dayEnd },
+        end: { $gt: dayStart },
+      });
+      const bookedMin = appts.reduce((a, ap) => a + Math.round((ap.end.getTime() - ap.start.getTime()) / MS_PER_MIN), 0);
+      weekUtil.push({ date, pct: availableMin > 0 ? Math.min(100, Math.round((bookedMin / availableMin) * 100)) : 0 });
+
+      const completedToday = appts.filter((ap) => ap.status === 'completed');
+      weekCuts += completedToday.length;
+      weekRevenueTnd += completedToday.reduce((a, ap) => a + (ap.price ?? 0), 0);
+    }
+
+    return { stylistId: staff._id.toString(), weekRevenueTnd, weekCuts, weekUtil };
+  }
+
+  /** Self-toggle only — a stylist stops being offered for new public bookings without deactivating the account. */
+  async setAcceptingBookings(scope: SalonScope, user: AuthUser, acceptingBookings: boolean): Promise<{ acceptingBookings: boolean }> {
+    const me = await this.staffModel.findOne({ _id: user.staffId, salonId: scope.salonId });
+    if (!me) throw new NotFoundException('Account not found.');
+    me.acceptingBookings = acceptingBookings;
+    await me.save();
+    return { acceptingBookings: me.acceptingBookings };
   }
 }

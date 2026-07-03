@@ -4,7 +4,7 @@ import { Request } from 'express';
 import { TeamService } from './team.service';
 import { AuthService } from '../auth/auth.service';
 import { CreateStaffAuthDto } from '../auth/dto/auth.dto';
-import { UpdateStaffDto } from './dto/team.dto';
+import { SetAcceptingBookingsDto, UpdateStaffDto } from './dto/team.dto';
 import { JwtGuard } from '../common/guards/jwt.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -39,6 +39,24 @@ export class TeamController {
   @Get('me/standing')
   async standing(@Req() req: Request, @CurrentUser() user: AuthUser) {
     const data = await this.team.myStanding(getSalonScope(req), user);
+    return { data, message: 'OK' };
+  }
+
+  // Must come before ':id' below — Express matches static segments in registration order.
+  @ApiOperation({ summary: "Toggle whether the current stylist is accepting new public bookings" })
+  @ApiResponse({ status: 200, description: 'Accepting-bookings state updated.' })
+  @Patch('me/accepting-bookings')
+  async setAcceptingBookings(@Req() req: Request, @CurrentUser() user: AuthUser, @Body() dto: SetAcceptingBookingsDto) {
+    const data = await this.team.setAcceptingBookings(getSalonScope(req), user, dto.acceptingBookings);
+    return { data, message: 'Accepting-bookings state updated.' };
+  }
+
+  @ApiOperation({ summary: "Get a staff member's this-week stats (revenue, cuts, chair utilisation) — owner/manager only" })
+  @ApiResponse({ status: 200, description: 'OK' })
+  @Get(':id/stats')
+  @Roles('owner', 'manager')
+  async stats(@Req() req: Request, @Param('id') id: string) {
+    const data = await this.team.staffStats(getSalonScope(req), id);
     return { data, message: 'OK' };
   }
 

@@ -52,6 +52,11 @@ export class Appointment {
 
   @Prop()
   deposit?: number;
+
+  // Manual POS check-in — lets the front desk flag a client as arrived/in-chair
+  // ahead of (or regardless of) the scheduled start time. Null = not checked in.
+  @Prop()
+  checkedInAt?: Date;
 }
 
 export const AppointmentSchema = SchemaFactory.createForClass(Appointment);

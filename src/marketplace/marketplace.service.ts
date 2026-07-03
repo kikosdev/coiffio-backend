@@ -139,7 +139,7 @@ export class MarketplaceService {
   async listPublicBarbers(): Promise<PublicBarber[]> {
     const staff = await this.staffModel
       .find({ role: { $in: ['stylist', 'colorist'] }, isActive: true, 'publicProfile.visible': true })
-      .select('name salonId week publicProfile')
+      .select('name salonId week publicProfile acceptingBookings')
       .lean();
 
     // ⚠️ StaffProfile.userId stocke en réalité Staff._id (pas l'identité User) — cf public.service.ts.
@@ -157,7 +157,7 @@ export class MarketplaceService {
         name: s.name,
         title: profile?.publicTitle || s.publicProfile?.title || '',
         isPro: profile?.seniorityTag === 'Master',
-        isAvailable: computeStaffOnShiftToday(s),
+        isAvailable: computeStaffOnShiftToday(s) && s.acceptingBookings !== false,
         initials: s.name.split(' ').map((w) => w[0] ?? '').join('').slice(0, 2).toUpperCase(),
       };
     });

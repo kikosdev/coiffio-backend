@@ -57,6 +57,11 @@ export class Staff {
   @Prop({ default: true })
   isActive: boolean;
 
+  // Self-toggle — stops the stylist from being offered for new public bookings
+  // (availability engine + marketplace "available" badge) without deactivating the account.
+  @Prop({ default: true })
+  acceptingBookings: boolean;
+
   @Prop({
     type: [
       {

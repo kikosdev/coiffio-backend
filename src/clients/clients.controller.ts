@@ -11,7 +11,7 @@ import {
 } from '@nestjs/common';
 import { Request } from 'express';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { ClientsService } from './clients.service';
+import { ClientsService, ClientDetail, ClientListItem } from './clients.service';
 import { CreateClientDto, ListClientsQueryDto, UpdateClientDto } from './dto/client.dto';
 import { JwtGuard } from '../common/guards/jwt.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
@@ -37,7 +37,7 @@ export class ClientsController {
   async list(
     @Req() req: Request,
     @Query() query: ListClientsQueryDto,
-  ): Promise<{ data: ClientDocument[]; message: string }> {
+  ): Promise<{ data: ClientListItem[]; message: string }> {
     const data = await this.clients.findAll(getSalonScope(req), query.q);
     return { data, message: 'OK' };
   }
@@ -48,7 +48,7 @@ export class ClientsController {
   async detail(
     @Req() req: Request,
     @Param('id') id: string,
-  ): Promise<{ data: ClientDocument; message: string }> {
+  ): Promise<{ data: ClientDetail; message: string }> {
     const data = await this.clients.findOne(getSalonScope(req), id);
     return { data, message: 'OK' };
   }

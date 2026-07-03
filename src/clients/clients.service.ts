@@ -1,10 +1,39 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { FilterQuery, Model } from 'mongoose';
-import { Client, ClientDocument } from './schemas/client.schema';
+import { FilterQuery, Model, Types } from 'mongoose';
+import { Client, ClientDocument, PreferredChannel } from './schemas/client.schema';
 import { CreateClientDto, UpdateClientDto } from './dto/client.dto';
 import { SalonScope } from '../common/scope/salon-scope';
 import { Appointment, AppointmentDocument } from '../booking/schemas/appointment.schema';
+
+export interface ClientStats {
+  visitCount: number;
+  totalSpentTnd: number;
+  lastVisitDate: string | null; // 'YYYY-MM-DD'
+}
+
+export interface ClientListItem {
+  id: string;
+  name: string;
+  phone: string;
+  email: string;
+  notes: string;
+  commsConsent: boolean;
+  preferredChannel: PreferredChannel;
+  visitCount: number;
+  totalSpentTnd: number;
+  lastVisitDate: string | null;
+}
+
+export interface ClientVisit {
+  serviceName: string;
+  date: string; // 'YYYY-MM-DD'
+  priceTnd: number;
+}
+
+export interface ClientDetail extends ClientListItem {
+  recentVisits: ClientVisit[];
+}
 
 export interface LatestVisit {
   appointmentId: string;
@@ -58,17 +87,78 @@ export class ClientsService {
     };
   }
 
+  /**
+   * Completed-appointment stats (visits/spend), batched per client via aggregation. Matched
+   * by `clientId` only (no `salonId` re-filter) — every id passed in already came from a
+   * salon-scoped `Client` query, so the scoping is transitive through the relation.
+   */
+  private async statsByClientId(clientIds: Types.ObjectId[]): Promise<Map<string, ClientStats>> {
+    if (clientIds.length === 0) return new Map();
+    const rows = await this.apptModel.aggregate<{ _id: Types.ObjectId; visitCount: number; totalSpentTnd: number; lastVisitDate: Date }>([
+      { $match: { clientId: { $in: clientIds }, status: 'completed' } },
+      { $group: { _id: '$clientId', visitCount: { $sum: 1 }, totalSpentTnd: { $sum: '$price' }, lastVisitDate: { $max: '$start' } } },
+    ]);
+    return new Map(
+      rows.map((r) => [
+        r._id.toString(),
+        {
+          visitCount: r.visitCount,
+          totalSpentTnd: r.totalSpentTnd,
+          lastVisitDate: r.lastVisitDate ? new Date(r.lastVisitDate).toISOString().slice(0, 10) : null,
+        },
+      ]),
+    );
+  }
+
+  private toListItem(c: ClientDocument, stats?: ClientStats): ClientListItem {
+    return {
+      id: c._id.toString(),
+      name: c.name,
+      phone: c.phone,
+      email: c.email,
+      notes: c.notes,
+      commsConsent: c.commsConsent,
+      preferredChannel: c.preferredChannel,
+      visitCount: stats?.visitCount ?? 0,
+      totalSpentTnd: stats?.totalSpentTnd ?? 0,
+      lastVisitDate: stats?.lastVisitDate ?? null,
+    };
+  }
+
   /** Liste scopée, recherche optionnelle `q` sur name/phone/email. */
-  async findAll(scope: SalonScope, q?: string): Promise<ClientDocument[]> {
+  async findAll(scope: SalonScope, q?: string): Promise<ClientListItem[]> {
     const filter: FilterQuery<ClientDocument> = { salonId: scope.salonId };
     if (q && q.trim()) {
       const rx = new RegExp(this.escapeRegex(q.trim()), 'i');
       filter.$or = [{ name: rx }, { phone: rx }, { email: rx }];
     }
-    return this.model.find(filter).sort({ createdAt: -1 }).exec();
+    const clients = await this.model.find(filter).sort({ createdAt: -1 }).exec();
+    const stats = await this.statsByClientId(clients.map((c) => c._id as Types.ObjectId));
+    return clients.map((c) => this.toListItem(c, stats.get(c._id.toString())));
   }
 
-  async findOne(scope: SalonScope, id: string): Promise<ClientDocument> {
+  async findOne(scope: SalonScope, id: string): Promise<ClientDetail> {
+    const doc = await this.model.findOne({ _id: id, salonId: scope.salonId }).exec();
+    if (!doc) throw new NotFoundException('Client not found.');
+
+    const stats = await this.statsByClientId([doc._id as Types.ObjectId]);
+    const visits = await this.apptModel
+      .find({ clientId: doc._id, status: 'completed' })
+      .sort({ start: -1 })
+      .limit(10)
+      .populate('services', 'name')
+      .lean();
+    const recentVisits: ClientVisit[] = visits.map((v: any) => ({
+      serviceName: (v.services ?? []).map((s: any) => s?.name).filter(Boolean).join(', ') || 'Service',
+      date: new Date(v.start).toISOString().slice(0, 10),
+      priceTnd: v.price ?? 0,
+    }));
+
+    return { ...this.toListItem(doc, stats.get(doc._id.toString())), recentVisits };
+  }
+
+  /** Raw doc read used internally by write paths (create/update) — no stats needed. */
+  private async findOneRaw(scope: SalonScope, id: string): Promise<ClientDocument> {
     const doc = await this.model.findOne({ _id: id, salonId: scope.salonId }).exec();
     if (!doc) throw new NotFoundException('Client not found.');
     return doc;
@@ -107,7 +197,7 @@ export class ClientsService {
   }
 
   async update(scope: SalonScope, id: string, dto: UpdateClientDto): Promise<ClientDocument> {
-    const doc = await this.findOne(scope, id);
+    const doc = await this.findOneRaw(scope, id);
     if (dto.name !== undefined) doc.name = dto.name;
     if (dto.phone !== undefined) doc.phone = dto.phone;
     if (dto.email !== undefined) doc.email = dto.email.toLowerCase();
