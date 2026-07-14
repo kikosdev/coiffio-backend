@@ -65,7 +65,10 @@ export class ClientsService {
    */
   async getLatestVisit(clientId: string): Promise<LatestVisit | null> {
     const appt: any = await this.apptModel
-      .findOne({ clientId, status: 'completed' })
+      // Appointment.clientId is genuinely stored as ObjectId but the schema doesn't get
+      // Mongoose to cast query filters for that path (see booking.service.ts's list()) —
+      // a raw string here would silently match nothing.
+      .findOne({ clientId: new Types.ObjectId(clientId), status: 'completed' })
       .sort({ start: -1 })
       .populate('stylistId', 'name')
       .lean();

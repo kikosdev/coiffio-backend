@@ -554,7 +554,10 @@ export class BookingService {
 
   async list(scope: SalonScope, date?: string, stylistId?: string): Promise<AppointmentDocument[]> {
     const filter: FilterQuery<AppointmentDocument> = { salonId: scope.salonId };
-    if (stylistId) filter.stylistId = stylistId;
+    // Appointment.stylistId is genuinely stored as ObjectId (populated from Staff._id at
+    // write time) but the schema's `@Prop({ type: Types.ObjectId })` doesn't get Mongoose to
+    // auto-cast query filters for this path — a raw string here silently matches nothing.
+    if (stylistId) filter.stylistId = new Types.ObjectId(stylistId);
     if (date) {
       filter.start = { $lt: dateAtMin(date, 24 * 60) };
       filter.end = { $gt: dateAtMin(date, 0) };
