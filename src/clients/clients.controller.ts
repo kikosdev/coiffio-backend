@@ -20,14 +20,14 @@ import { getSalonScope } from '../common/scope/salon-scope';
 import { ClientDocument } from './schemas/client.schema';
 
 /**
- * CRM (Sprint 2). Matrice : create/edit client = owner·manager·stylist.
+ * CRM (Sprint 2). Matrice : create/edit client = owner·manager·stylist·colorist.
  * Toutes les queries passent par getSalonScope() (convention #3). Enveloppe standard.
  */
 @ApiTags('Clients')
 @ApiBearerAuth()
 @Controller('clients')
 @UseGuards(JwtGuard, RolesGuard)
-@Roles('owner', 'manager', 'stylist')
+@Roles('owner', 'manager', 'stylist', 'colorist')
 export class ClientsController {
   constructor(private readonly clients: ClientsService) {}
 

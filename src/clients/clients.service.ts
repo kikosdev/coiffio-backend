@@ -143,7 +143,7 @@ export class ClientsService {
 
     const stats = await this.statsByClientId([doc._id as Types.ObjectId]);
     const visits = await this.apptModel
-      .find({ clientId: doc._id, status: 'completed' })
+      .find({ clientId: doc._id, status: { $nin: ['cancelled', 'noshow'] } })
       .sort({ start: -1 })
       .limit(10)
       .populate('services', 'name')
