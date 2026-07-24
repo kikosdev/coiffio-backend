@@ -348,8 +348,9 @@ export class BookingService {
     const end = new Date(start.getTime() + need * MS_PER_MIN);
 
     const stylist = await this.assertStylist(scope, dto.stylistId);
+    const hasContactIdentity = !!dto.clientName && !!dto.clientPhone;
     const clientInput: ResolveClientInput =
-      user?.role === 'client' && user.clientId && !dto.clientId
+      user?.role === 'client' && user.clientId && !dto.clientId && !hasContactIdentity
         ? { ...dto, clientId: user.clientId }
         : dto;
     const clientId = await this.resolveClient(scope, clientInput);
