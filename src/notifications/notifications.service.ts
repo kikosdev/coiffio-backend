@@ -47,7 +47,11 @@ export class NotificationsService {
       read: false,
       date: new Date(),
     });
-    if (input.userId) this.gateway.emitToRoom(`user:${input.userId.toString()}`, input.type, notif);
+    if (input.userId) {
+      const id = input.userId.toString();
+      this.gateway.emitToRoom(`user:${id}`, input.type, notif);
+      this.gateway.emitToRoom(`staff:${id}`, input.type, notif);
+    }
     if (input.role) this.gateway.emitToRoom(`role:${input.role}`, input.type, notif);
     if (input.broadcast) this.gateway.emitToRoom(`salon:${input.salonId.toString()}`, input.type, notif);
     return notif;
@@ -84,20 +88,22 @@ export class NotificationsService {
 
   /** Liste scopée : userId == soi OU role match (#4). */
   async list(scope: SalonScope, user: AuthUser): Promise<NotificationDocument[]> {
+    const userIds = [user.sub, user.staffId].filter(Boolean).map((id) => new Types.ObjectId(id as string));
     return this.model
       .find({
         salonId: scope.salonId,
-        $or: [{ userId: new Types.ObjectId(user.sub) }, { role: user.role }],
+        $or: [{ userId: { $in: userIds } }, { role: user.role }],
       })
       .sort({ date: -1 })
       .limit(100);
   }
 
   async markRead(scope: SalonScope, user: AuthUser, id: string): Promise<NotificationDocument> {
+    const userIds = [user.sub, user.staffId].filter(Boolean).map((value) => new Types.ObjectId(value as string));
     const n = await this.model.findOne({
       _id: id,
       salonId: scope.salonId,
-      $or: [{ userId: new Types.ObjectId(user.sub) }, { role: user.role }],
+      $or: [{ userId: { $in: userIds } }, { role: user.role }],
     });
     if (!n) throw new NotFoundException('Notification not found.');
     n.read = true;
@@ -106,8 +112,9 @@ export class NotificationsService {
   }
 
   async readAll(scope: SalonScope, user: AuthUser): Promise<{ updated: number }> {
+    const userIds = [user.sub, user.staffId].filter(Boolean).map((id) => new Types.ObjectId(id as string));
     const res = await this.model.updateMany(
-      { salonId: scope.salonId, read: false, $or: [{ userId: new Types.ObjectId(user.sub) }, { role: user.role }] },
+      { salonId: scope.salonId, read: false, $or: [{ userId: { $in: userIds } }, { role: user.role }] },
       { $set: { read: true } },
     );
     return { updated: res.modifiedCount ?? 0 };

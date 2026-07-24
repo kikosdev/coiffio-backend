@@ -50,6 +50,9 @@ export class Appointment {
   @Prop({ default: 0 })
   price: number;
 
+  @Prop({ index: true })
+  checkInCode?: string;
+
   @Prop()
   deposit?: number;
 

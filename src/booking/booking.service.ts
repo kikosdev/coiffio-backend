@@ -281,9 +281,9 @@ export class BookingService {
     return out;
   }
 
-  // ─── Client resolution (merge-on-phone #10, email mandatoire #11) ───────────
+  // ─── Client resolution (merge-on-phone #10) ────────────────────────────────
 
-  private async resolveClient(scope: SalonScope, input: ResolveClientInput, requireEmail: boolean): Promise<Types.ObjectId> {
+  private async resolveClient(scope: SalonScope, input: ResolveClientInput): Promise<Types.ObjectId> {
     if (input.clientId) {
       const c = await this.clientModel.findOne({ _id: input.clientId, salonId: scope.salonId });
       if (!c) throw new BadRequestException('Client not found.');
@@ -291,9 +291,6 @@ export class BookingService {
     }
     if (!input.clientName || !input.clientPhone) {
       throw new BadRequestException('Provide clientId, or clientName + clientPhone.');
-    }
-    if (requireEmail && !input.clientEmail) {
-      throw new BadRequestException('Email is required for an online booking.');
     }
     // merge-on-phone (#10) : un seul Client par phone dans le salon.
     const existing = await this.clientModel.findOne({ salonId: scope.salonId, phone: input.clientPhone });
@@ -351,7 +348,11 @@ export class BookingService {
     const end = new Date(start.getTime() + need * MS_PER_MIN);
 
     const stylist = await this.assertStylist(scope, dto.stylistId);
-    const clientId = await this.resolveClient(scope, dto, source === 'online');
+    const clientInput: ResolveClientInput =
+      user?.role === 'client' && user.clientId && !dto.clientId
+        ? { ...dto, clientId: user.clientId }
+        : dto;
+    const clientId = await this.resolveClient(scope, clientInput);
     const groupId = randomUUID();
     const serviceIds = services.map((s) => s._id as Types.ObjectId);
 
@@ -377,6 +378,8 @@ export class BookingService {
     });
 
     const appt = await this.insertWithLock(conflictFilter, insertDoc);
+    appt.checkInCode = this.checkInCodeFor(appt._id.toString());
+    await appt.save();
 
     // Point d'appel notification BOOKING_CREATED (branché réellement au Sprint 8).
     if (source === 'online') {
@@ -402,7 +405,7 @@ export class BookingService {
     const end = new Date(start.getTime() + need * MS_PER_MIN);
 
     const stylist = await this.assertStylist(scope, dto.stylistId);
-    const clientId = await this.resolveClient(scope, dto, false);
+    const clientId = await this.resolveClient(scope, dto);
 
     return this.apptModel.create({
       salonId: scope.salonId,
@@ -455,6 +458,11 @@ export class BookingService {
   private isTxnUnsupported(err: unknown): boolean {
     const msg = err instanceof Error ? err.message : String(err);
     return /Transaction numbers are only allowed on a replica set|Transactions are not supported|replica set/i.test(msg);
+  }
+
+  private checkInCodeFor(id: string): string {
+    const numeric = parseInt(id.slice(-6), 16) % 1000;
+    return `B${String(numeric).padStart(3, '0')}`;
   }
 
   /**

@@ -4,12 +4,22 @@ import { OnGatewayConnection, WebSocketGateway, WebSocketServer } from '@nestjs/
 import { Server, Socket } from 'socket.io';
 import { AuthUser } from '../common/decorators/current-user.decorator';
 
+const allowedOrigins = [process.env.FRONTEND_ORIGIN, process.env.DESKTOP_ORIGIN].filter((origin): origin is string => !!origin);
+
 /**
  * Gateway Socket.io (Sprint 8). Auth JWT AU HANDSHAKE ; rooms jointes CÔTÉ SERVEUR
  * uniquement (salon:{id}, user:{sub}, role:{role}). Aucun join déclenché par le client
  * (faille du build précédent corrigée).
  */
-@WebSocketGateway({ cors: { origin: process.env.FRONTEND_ORIGIN, credentials: true } })
+@WebSocketGateway({
+  cors: {
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+      if (!origin || allowedOrigins.includes(origin)) callback(null, true);
+      else callback(new Error('Not allowed by CORS'), false);
+    },
+    credentials: true,
+  },
+})
 export class NotificationsGateway implements OnGatewayConnection {
   private readonly logger = new Logger(NotificationsGateway.name);
 
@@ -31,6 +41,7 @@ export class NotificationsGateway implements OnGatewayConnection {
       // Rooms jointes par le SERVEUR depuis le JWT (jamais par un message client).
       socket.join(`salon:${user.salonId}`);
       socket.join(`user:${user.sub}`);
+      if (user.staffId) socket.join(`staff:${user.staffId}`);
       socket.join(`role:${user.role}`);
       (socket.data as { user?: AuthUser }).user = user;
     } catch {

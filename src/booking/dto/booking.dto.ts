@@ -79,7 +79,7 @@ export class CreateAppointmentDto {
   @IsMongoId()
   clientId?: string;
 
-  // …ou résolution merge-on-phone (#10) : nom + phone + email (email mandatoire #11).
+  // …ou résolution merge-on-phone (#10) : nom + phone. Email is optional.
   @IsOptional()
   @IsString()
   clientName?: string;
