@@ -35,6 +35,7 @@ export interface SalonOffering {
 export interface PublicBarber {
   staffId: string;
   salonId: string;
+  salonName: string;
   name: string;
   title: string;
   isPro: boolean;
@@ -171,12 +172,19 @@ export class MarketplaceService {
       .select('userId publicTitle seniorityTag')
       .lean();
     const profileByStaffId = new Map(profiles.map((p) => [p.userId.toString(), p]));
+    const salons = await this.salonModel
+      .find({ _id: { $in: [...new Set(staff.map((s) => s.salonId.toString()))].map((id) => new Types.ObjectId(id)) } })
+      .select('name')
+      .lean();
+    const salonNameById = new Map(salons.map((salon) => [salon._id.toString(), salon.name]));
 
     return staff.map((s): PublicBarber => {
       const profile = profileByStaffId.get(s._id.toString());
+      const salonId = s.salonId.toString();
       return {
         staffId: s._id.toString(),
-        salonId: s.salonId.toString(),
+        salonId,
+        salonName: salonNameById.get(salonId) ?? '',
         name: s.name,
         title: profile?.publicTitle || s.publicProfile?.title || '',
         isPro: profile?.seniorityTag === 'Master',
