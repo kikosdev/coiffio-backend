@@ -65,6 +65,7 @@ interface ResolveClientInput {
   clientName?: string;
   clientPhone?: string;
   clientEmail?: string;
+  userId?: string;
 }
 
 @Injectable()
@@ -295,14 +296,18 @@ export class BookingService {
     // merge-on-phone (#10) : un seul Client par phone dans le salon.
     const existing = await this.clientModel.findOne({ salonId: scope.salonId, phone: input.clientPhone });
     if (existing) {
+      if (input.userId && (!existing.userId || existing.userId.toString() === input.userId)) {
+        existing.userId = new Types.ObjectId(input.userId);
+      }
       if (input.clientEmail && !existing.email) {
         existing.email = input.clientEmail;
-        await existing.save();
       }
+      await existing.save();
       return existing._id as Types.ObjectId;
     }
     const created = await this.clientModel.create({
       salonId: scope.salonId,
+      userId: input.userId ? new Types.ObjectId(input.userId) : null,
       name: input.clientName,
       phone: input.clientPhone,
       email: input.clientEmail ?? '',
@@ -352,7 +357,7 @@ export class BookingService {
     const clientInput: ResolveClientInput =
       user?.role === 'client' && user.clientId && !dto.clientId && !hasContactIdentity
         ? { ...dto, clientId: user.clientId }
-        : dto;
+        : { ...dto, userId: user?.role === 'client' ? user.sub : undefined };
     const clientId = await this.resolveClient(scope, clientInput);
     const groupId = randomUUID();
     const serviceIds = services.map((s) => s._id as Types.ObjectId);
@@ -503,7 +508,10 @@ export class BookingService {
    * booked at — collect them all rather than scoping to a single salon.
    */
   async listMine(user: AuthUser, scope: 'upcoming' | 'history'): Promise<Record<string, unknown>[]> {
-    const clientIds = await this.clientModel.find({ userId: user.sub }).distinct('_id');
+    const clientIdentityFilter: FilterQuery<ClientDocument> = user.phone
+      ? { $or: [{ userId: user.sub }, { phone: user.phone }] }
+      : { userId: user.sub };
+    const clientIds = await this.clientModel.find(clientIdentityFilter).distinct('_id');
     if (!clientIds.length) return [];
 
     const now = new Date();
@@ -557,6 +565,7 @@ export class BookingService {
         end: a.end,
         price: a.price,
         status: a.status as string,
+        checkInCode: a.checkInCode ?? null,
       };
     });
   }
