@@ -38,7 +38,12 @@ export class MarketplaceController {
   @Get('services/offerings')
   async offerings(@Query() query: OfferingsQueryDto): Promise<{ data: SalonOffering[]; message: string }> {
     const data = await this.marketplace.findOfferings(
-      { category: query.category, name: query.name },
+      {
+        category: query.category,
+        categories: [query.categories, query['categories[]']].flatMap((value) => (Array.isArray(value) ? value : value ? [value] : [])),
+        name: query.name,
+        names: [query.names, query['names[]']].flatMap((value) => (Array.isArray(value) ? value : value ? [value] : [])),
+      },
       query.lat,
       query.lng,
     );

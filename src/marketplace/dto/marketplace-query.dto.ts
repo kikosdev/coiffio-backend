@@ -13,8 +13,24 @@ export class OfferingsQueryDto {
   category?: string;
 
   @IsOptional()
+  @IsString({ each: true })
+  categories?: string | string[];
+
+  @IsOptional()
+  @IsString({ each: true })
+  'categories[]'?: string | string[];
+
+  @IsOptional()
   @IsString()
   name?: string;
+
+  @IsOptional()
+  @IsString({ each: true })
+  names?: string | string[];
+
+  @IsOptional()
+  @IsString({ each: true })
+  'names[]'?: string | string[];
 
   @IsOptional()
   @Type(() => Number)
@@ -26,4 +42,3 @@ export class OfferingsQueryDto {
   @IsNumber()
   lng?: number;
 }
-

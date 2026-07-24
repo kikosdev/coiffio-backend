@@ -78,29 +78,51 @@ export class MarketplaceService {
     return [...seen.values()];
   }
 
-  /** Tier-2 : salons offrant un service (category ou name exact), avec LEUR prix (A1). */
-  async findOfferings(filter: { category?: string; name?: string }, lat?: number, lng?: number): Promise<SalonOffering[]> {
-    if (!filter.category && !filter.name) {
-      throw new BadRequestException('category or name is required.');
+  /** Tier-2 : salons offering all selected categories/names, with their combined best price. */
+  async findOfferings(
+    filter: { category?: string; categories?: string | string[]; name?: string; names?: string | string[] },
+    lat?: number,
+    lng?: number,
+  ): Promise<SalonOffering[]> {
+    const categories = this.uniqueList([filter.category, ...this.asList(filter.categories)]);
+    const names = this.uniqueList([filter.name, ...this.asList(filter.names)]);
+    if (categories.length === 0 && names.length === 0) {
+      throw new BadRequestException('category/categories or name/names is required.');
     }
 
-    const match: Record<string, unknown> = { active: true, isPublic: true };
-    if (filter.category) match.category = new RegExp(`^${this.escapeRegex(filter.category)}$`, 'i');
-    if (filter.name) match.name = new RegExp(`^${this.escapeRegex(filter.name)}$`, 'i');
+    const criteria = [
+      ...categories.map((value) => ({ key: `category:${value.toLowerCase()}`, field: 'category' as const, value, re: new RegExp(`^${this.escapeRegex(value)}$`, 'i') })),
+      ...names.map((value) => ({ key: `name:${value.toLowerCase()}`, field: 'name' as const, value, re: new RegExp(`^${this.escapeRegex(value)}$`, 'i') })),
+    ];
 
     const services = await this.serviceModel
-      .find(match)
-      .select('salonId name price durationMin')
+      .find({
+        active: true,
+        isPublic: true,
+        $or: criteria.map((c) => ({ [c.field]: c.re })),
+      })
+      .select('salonId name category price durationMin')
       .lean();
 
-    // Plusieurs services peuvent matcher dans un même salon (cas category) — garder le moins cher.
-    const bySalon = new Map<string, { salonId: Types.ObjectId; name: string; price: number; durationMin: number }>();
+    const bySalon = new Map<string, {
+      matches: Map<string, { id: string; name: string; price: number; durationMin: number }>;
+    }>();
     for (const s of services) {
-      const key = s.salonId.toString();
-      const cur = bySalon.get(key);
-      if (!cur || s.price < cur.price) bySalon.set(key, s as any);
+      const salonKey = s.salonId.toString();
+      const row = bySalon.get(salonKey) ?? { matches: new Map<string, { id: string; name: string; price: number; durationMin: number }>() };
+      for (const criterion of criteria) {
+        const value = criterion.field === 'category' ? s.category : s.name;
+        if (!criterion.re.test(value ?? '')) continue;
+        const current = row.matches.get(criterion.key);
+        if (!current || s.price < current.price) {
+          row.matches.set(criterion.key, { id: s._id.toString(), name: s.name, price: s.price, durationMin: s.durationMin ?? 0 });
+        }
+      }
+      bySalon.set(salonKey, row);
     }
-    const salonIds = [...bySalon.keys()].map((id) => new Types.ObjectId(id));
+
+    const matched = [...bySalon.entries()].filter(([, row]) => row.matches.size === criteria.length);
+    const salonIds = matched.map(([id]) => new Types.ObjectId(id));
     if (salonIds.length === 0) return [];
 
     let salons: any[];
@@ -120,14 +142,15 @@ export class MarketplaceService {
     }
 
     return salons.map((s): SalonOffering => {
-      const svc = bySalon.get(s._id.toString());
+      const row = bySalon.get(s._id.toString());
+      const matchedServices = this.uniqueServices(row ? [...row.matches.values()] : []);
       return {
         salonId: s._id.toString(),
         name: s.name,
         address: s.address ?? '',
-        serviceName: svc?.name ?? null,
-        price: svc?.price ?? null,
-        durationMin: svc?.durationMin ?? null,
+        serviceName: matchedServices.length ? matchedServices.map((service) => service.name).join(' + ') : null,
+        price: matchedServices.length ? matchedServices.reduce((sum, service) => sum + service.price, 0) : null,
+        durationMin: matchedServices.length ? matchedServices.reduce((sum, service) => sum + service.durationMin, 0) : null,
         distanceKm: s.distanceMeters != null ? Math.round((s.distanceMeters / 1000) * 10) / 10 : null,
         isOpen: computeSalonIsOpen(s),
         coverImage: null, // pas de champ image sur Salon aujourd'hui
@@ -165,5 +188,18 @@ export class MarketplaceService {
 
   private escapeRegex(s: string): string {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  private asList(value?: string | string[]): string[] {
+    if (value === undefined) return [];
+    return Array.isArray(value) ? value : [value];
+  }
+
+  private uniqueList(values: Array<string | undefined>): string[] {
+    return [...new Set(values.map((v) => v?.trim()).filter((v): v is string => !!v))];
+  }
+
+  private uniqueServices<T extends { id: string }>(services: T[]): T[] {
+    return [...new Map(services.map((service) => [service.id, service])).values()];
   }
 }
