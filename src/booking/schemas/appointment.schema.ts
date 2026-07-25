@@ -33,6 +33,9 @@ export class Appointment {
   @Prop({ required: true, index: true })
   start: Date;
 
+  @Prop({ required: true, index: true })
+  startDay: string;
+
   @Prop({ required: true })
   end: Date;
 
@@ -65,3 +68,7 @@ export class Appointment {
 export const AppointmentSchema = SchemaFactory.createForClass(Appointment);
 // Requêtes de chevauchement par stylist sur une plage de dates (conflits + availability).
 AppointmentSchema.index({ salonId: 1, stylistId: 1, start: 1, end: 1 });
+AppointmentSchema.index(
+  { salonId: 1, startDay: 1, checkInCode: 1 },
+  { unique: true, partialFilterExpression: { checkInCode: { $exists: true }, startDay: { $exists: true } } },
+);

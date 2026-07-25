@@ -357,6 +357,45 @@ export class AuthService {
     await user.save();
   }
 
+  async deactivateMe(auth: AuthUser): Promise<void> {
+    const user = await this.userModel.findById(auth.sub);
+    if (!user) throw new UnauthorizedException('Account not found.');
+
+    if (user.role === 'client') {
+      user.isActive = false;
+      await user.save();
+      return;
+    }
+
+    const staff = await this.staffModel.findById(auth.staffId);
+    if (!staff) throw new UnauthorizedException('Staff profile not found.');
+
+    if (staff.role === 'owner') {
+      const activeOwners = await this.staffModel.countDocuments({
+        salonId: staff.salonId,
+        role: 'owner',
+        isActive: true,
+        _id: { $ne: staff._id },
+      });
+      if (activeOwners === 0) {
+        throw new BadRequestException('Cannot deactivate the sole owner. Transfer ownership first.');
+      }
+    }
+
+    user.isActive = false;
+    staff.isActive = false;
+    staff.acceptingBookings = false;
+    await Promise.all([user.save(), staff.save()]);
+  }
+
+  async updateExpoPushToken(auth: AuthUser, expoPushToken?: string | null): Promise<void> {
+    const user = await this.userModel.findById(auth.sub);
+    if (!user) throw new UnauthorizedException('Account not found.');
+    if (expoPushToken) user.expoPushToken = expoPushToken;
+    else user.expoPushToken = undefined;
+    await user.save();
+  }
+
   async requestPasswordReset(dto: PasswordResetRequestDto): Promise<{ sent: boolean }> {
     const id = normalizeIdentifier(dto.identifier);
     const user = await this.userModel.findOne({ identifier: id.value, isActive: true });

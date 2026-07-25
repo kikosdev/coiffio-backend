@@ -4,7 +4,11 @@ import { OnGatewayConnection, WebSocketGateway, WebSocketServer } from '@nestjs/
 import { Server, Socket } from 'socket.io';
 import { AuthUser } from '../common/decorators/current-user.decorator';
 
-const allowedOrigins = [process.env.FRONTEND_ORIGIN, process.env.DESKTOP_ORIGIN].filter((origin): origin is string => !!origin);
+const allowedOrigins = [
+  process.env.FRONTEND_ORIGIN,
+  process.env.DESKTOP_ORIGIN,
+  ...(process.env.MOBILE_ORIGINS?.split(',').map((origin) => origin.trim()).filter(Boolean) ?? []),
+].filter((origin): origin is string => !!origin);
 
 /**
  * Gateway Socket.io (Sprint 8). Auth JWT AU HANDSHAKE ; rooms jointes CÔTÉ SERVEUR

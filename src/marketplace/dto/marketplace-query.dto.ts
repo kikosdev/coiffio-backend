@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsNumber, IsOptional, IsString, MinLength } from 'class-validator';
+import { IsIn, IsNumber, IsOptional, IsString, MinLength } from 'class-validator';
 
 export class SearchServicesQueryDto {
   @IsString()
@@ -31,6 +31,18 @@ export class OfferingsQueryDto {
   @IsOptional()
   @IsString({ each: true })
   'names[]'?: string | string[];
+
+  @IsOptional()
+  @IsString({ each: true })
+  serviceIds?: string | string[];
+
+  @IsOptional()
+  @IsString({ each: true })
+  'serviceIds[]'?: string | string[];
+
+  @IsOptional()
+  @IsIn(['all', 'any'])
+  match?: 'all' | 'any';
 
   @IsOptional()
   @Type(() => Number)

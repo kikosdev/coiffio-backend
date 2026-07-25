@@ -19,6 +19,7 @@ import {
   PasswordResetConfirmDto,
   PasswordResetRequestDto,
   RegisterDto,
+  UpdateExpoPushTokenDto,
   UpdateMeDto,
 } from './dto/auth.dto';
 import { JwtGuard } from '../common/guards/jwt.guard';
@@ -160,6 +161,33 @@ export class AuthController {
   ): Promise<{ data: { ok: boolean }; message: string }> {
     await this.auth.changePassword(user, dto);
     return { data: { ok: true }, message: 'Mot de passe mis à jour.' };
+  }
+
+  @ApiOperation({ summary: "Deactivate the currently authenticated user's account" })
+  @ApiResponse({ status: 200, description: 'Account deactivated.' })
+  @ApiBearerAuth()
+  @Patch('me/deactivate')
+  @UseGuards(JwtGuard)
+  async deactivateMe(
+    @CurrentUser() user: AuthUser,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<{ data: { ok: boolean }; message: string }> {
+    await this.auth.deactivateMe(user);
+    res.clearCookie(COOKIE_NAME, { path: '/' });
+    return { data: { ok: true }, message: 'Account deactivated.' };
+  }
+
+  @ApiOperation({ summary: "Store or clear the current user's Expo push token" })
+  @ApiResponse({ status: 200, description: 'Push token updated.' })
+  @ApiBearerAuth()
+  @Patch('me/push-token')
+  @UseGuards(JwtGuard)
+  async updatePushToken(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: UpdateExpoPushTokenDto,
+  ): Promise<{ data: { ok: boolean }; message: string }> {
+    await this.auth.updateExpoPushToken(user, dto.expoPushToken);
+    return { data: { ok: true }, message: 'Push token updated.' };
   }
 
   @ApiOperation({ summary: 'Sign out and clear the access_token cookie' })

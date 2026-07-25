@@ -19,9 +19,19 @@ async function bootstrap() {
   app.useGlobalInterceptors(new ResponseInterceptor());
   app.useGlobalFilters(new AllExceptionsFilter());
 
-  // CORS — exact origins only, never '*' (required for cookies + desktop Bearer)
-  const allowedOrigins = [process.env.FRONTEND_ORIGIN, process.env.DESKTOP_ORIGIN].filter((o): o is string => !!o);
-  app.enableCors({ origin: allowedOrigins, credentials: true });
+  // CORS — exact configured origins, plus origin-less native clients (React Native).
+  const allowedOrigins = [
+    process.env.FRONTEND_ORIGIN,
+    process.env.DESKTOP_ORIGIN,
+    ...(process.env.MOBILE_ORIGINS?.split(',').map((o) => o.trim()).filter(Boolean) ?? []),
+  ].filter((o): o is string => !!o);
+  app.enableCors({
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) callback(null, true);
+      else callback(new Error('Not allowed by CORS'));
+    },
+    credentials: true,
+  });
 
   const swaggerConfig = new DocumentBuilder()
     .setTitle('Coiffio API')

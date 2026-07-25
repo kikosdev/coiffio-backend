@@ -8,7 +8,7 @@ import {
 } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { Connection, FilterQuery, Model, Types } from 'mongoose';
-import { randomUUID } from 'crypto';
+import { randomInt, randomUUID } from 'crypto';
 import { Appointment, AppointmentDocument } from './schemas/appointment.schema';
 import { Service, ServiceDocument } from '../services/schemas/service.schema';
 import { Schedule, ScheduleDocument } from '../team/schemas/schedule.schema';
@@ -60,12 +60,46 @@ export interface TimelineDay {
   stylists: StylistAvailability[];
 }
 
+export interface HydratedStaffAppointment {
+  id: string;
+  date: string;
+  start: Date;
+  end: Date;
+  startTime: string;
+  clientId: string;
+  clientName: string;
+  clientInitials: string;
+  phone: string;
+  services: { id: string; name: string; durationMin: number; priceTnd: number }[];
+  durationMin: number;
+  totalTnd: number;
+  status: string;
+  state: 'waiting' | 'in_chair' | 'done';
+  note?: string;
+  visitCount: number;
+  checkInCode?: string | null;
+}
+
+export interface StaffScheduleWeek {
+  weekDates: string[];
+  dayWindows: Record<string, { start: string; end: string } | null>;
+  slots: HydratedStaffAppointment[];
+}
+
 interface ResolveClientInput {
   clientId?: string;
   clientName?: string;
   clientPhone?: string;
   clientEmail?: string;
   userId?: string;
+}
+
+function initials(name: string): string {
+  return name.split(' ').map((w) => w[0] ?? '').join('').slice(0, 2).toUpperCase();
+}
+
+function staffState(status: string): 'waiting' | 'in_chair' | 'done' {
+  return status === 'completed' ? 'done' : 'waiting';
 }
 
 @Injectable()
@@ -351,6 +385,7 @@ export class BookingService {
     const start = new Date(dto.start);
     if (Number.isNaN(start.getTime())) throw new BadRequestException('Invalid start datetime.');
     const end = new Date(start.getTime() + need * MS_PER_MIN);
+    const startDay = start.toISOString().slice(0, 10);
 
     const stylist = await this.assertStylist(scope, dto.stylistId);
     const hasContactIdentity = !!dto.clientName && !!dto.clientPhone;
@@ -369,6 +404,7 @@ export class BookingService {
       groupId,
       services: serviceIds,
       start,
+      startDay,
       end,
       status: 'booked' as const,
       source,
@@ -383,9 +419,7 @@ export class BookingService {
       end: { $gt: start },
     });
 
-    const appt = await this.insertWithLock(conflictFilter, insertDoc);
-    appt.checkInCode = this.checkInCodeFor(appt._id.toString());
-    await appt.save();
+    const appt = await this.insertWithLockAndCode(conflictFilter, insertDoc, scope.salonId, startDay);
 
     // Point d'appel notification BOOKING_CREATED (branché réellement au Sprint 8).
     if (source === 'online') {
@@ -409,10 +443,12 @@ export class BookingService {
     const start = dto.start ? new Date(dto.start) : new Date();
     if (Number.isNaN(start.getTime())) throw new BadRequestException('Invalid start datetime.');
     const end = new Date(start.getTime() + need * MS_PER_MIN);
+    const startDay = start.toISOString().slice(0, 10);
 
     const stylist = await this.assertStylist(scope, dto.stylistId);
     const clientId = await this.resolveClient(scope, dto);
 
+    const checkInCode = await this.generateCheckInCode(scope.salonId, startDay);
     return this.apptModel.create({
       salonId: scope.salonId,
       stylistId: stylist._id,
@@ -420,10 +456,12 @@ export class BookingService {
       groupId: randomUUID(),
       services: services.map((s) => s._id as Types.ObjectId),
       start,
+      startDay,
       end,
       status: 'booked',
       source: 'walkin',
       price,
+      checkInCode,
     });
   }
 
@@ -466,9 +504,34 @@ export class BookingService {
     return /Transaction numbers are only allowed on a replica set|Transactions are not supported|replica set/i.test(msg);
   }
 
-  private checkInCodeFor(id: string): string {
-    const numeric = parseInt(id.slice(-6), 16) % 1000;
-    return `B${String(numeric).padStart(3, '0')}`;
+  private isDuplicateKey(err: unknown): boolean {
+    return typeof err === 'object' && err !== null && 'code' in err && (err as { code?: number }).code === 11000;
+  }
+
+  private async insertWithLockAndCode(
+    conflictFilter: () => FilterQuery<AppointmentDocument>,
+    insertDoc: Record<string, unknown>,
+    salonId: Types.ObjectId | string,
+    startDay: string,
+  ): Promise<AppointmentDocument> {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const checkInCode = await this.generateCheckInCode(salonId, startDay);
+      try {
+        return await this.insertWithLock(conflictFilter, { ...insertDoc, checkInCode });
+      } catch (err) {
+        if (!this.isDuplicateKey(err)) throw err;
+      }
+    }
+    throw new ConflictException('Could not allocate a booking code. Please try again.');
+  }
+
+  private async generateCheckInCode(salonId: Types.ObjectId | string, startDay: string): Promise<string> {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const code = `B${String(randomInt(0, 1000)).padStart(3, '0')}`;
+      const exists = await this.apptModel.exists({ salonId, startDay, checkInCode: code });
+      if (!exists) return code;
+    }
+    throw new ConflictException('Could not allocate a booking code. Please try again.');
   }
 
   /**
@@ -478,8 +541,16 @@ export class BookingService {
    */
   private emitBookingCreated(appt: AppointmentDocument, meta: { clientName: string; serviceName: string }): void {
     // Persist-then-emit (#7) + scoping (#4) : stylist concerné + owner salon-wide.
-    const payload = { appointmentId: appt._id.toString(), start: appt.start, stylistId: appt.stylistId.toString(), groupId: appt.groupId };
-    void this.notifications.dispatch({ salonId: appt.salonId, userId: appt.stylistId, type: SOCKET_EVENTS.APPOINTMENT_CREATED, payload });
+    const payload = {
+      appointmentId: appt._id.toString(),
+      start: appt.start,
+      stylistId: appt.stylistId.toString(),
+      groupId: appt.groupId,
+      clientName: meta.clientName,
+      serviceName: meta.serviceName,
+      checkInCode: appt.checkInCode,
+    };
+    void this.notifications.dispatch({ salonId: appt.salonId, staffId: appt.stylistId, type: SOCKET_EVENTS.APPOINTMENT_CREATED, payload });
     void this.notifications.dispatch({ salonId: appt.salonId, role: 'owner', type: SOCKET_EVENTS.APPOINTMENT_CREATED, payload });
     // Broadcast too (SKILL_fix_pos_board_notifications) — the POS kiosk isn't signed in as
     // any specific user/role that the two dispatches above would reach (bb_pos_token has
@@ -501,6 +572,86 @@ export class BookingService {
   }
 
   // ─── Read / cancel ──────────────────────────────────────────────────────────
+
+  async staffToday(scope: SalonScope, user: AuthUser, date = todayIso()): Promise<HydratedStaffAppointment[]> {
+    if (!user.staffId) throw new BadRequestException('Staff profile is required.');
+    return this.hydratedStaffAppointments(scope, user.staffId, date, date);
+  }
+
+  async staffScheduleWeek(scope: SalonScope, user: AuthUser, startDate = todayIso()): Promise<StaffScheduleWeek> {
+    if (!user.staffId) throw new BadRequestException('Staff profile is required.');
+    const weekDates = Array.from({ length: 7 }, (_, i) => addDaysIso(startDate, i));
+    const schedule = await this.scheduleModel.findOne({ salonId: scope.salonId, stylistId: new Types.ObjectId(user.staffId) }).lean();
+    const dayWindows: StaffScheduleWeek['dayWindows'] = {};
+    for (const date of weekDates) {
+      const window = schedule ? effectiveWindow(schedule.weekly, schedule.overrides, date) : null;
+      dayWindows[date] = window ? { start: minToHhmm(window.start), end: minToHhmm(window.end) } : null;
+    }
+    const slots = await this.hydratedStaffAppointments(scope, user.staffId, weekDates[0], weekDates[weekDates.length - 1]);
+    return { weekDates, dayWindows, slots };
+  }
+
+  async clientHome(user: AuthUser): Promise<{ upcoming: Record<string, unknown>[]; history: Record<string, unknown>[] }> {
+    const [upcoming, history] = await Promise.all([
+      this.listMine(user, 'upcoming'),
+      this.listMine(user, 'history'),
+    ]);
+    return { upcoming, history };
+  }
+
+  private async hydratedStaffAppointments(
+    scope: SalonScope,
+    staffId: string,
+    startDate: string,
+    endDate: string,
+  ): Promise<HydratedStaffAppointment[]> {
+    const stylistId = new Types.ObjectId(staffId);
+    const appts: any[] = await this.apptModel
+      .find({
+        salonId: scope.salonId,
+        stylistId,
+        start: { $lt: dateAtMin(addDaysIso(endDate, 1), 0) },
+        end: { $gt: dateAtMin(startDate, 0) },
+      })
+      .sort({ start: 1 })
+      .populate('clientId', 'name phone notes history')
+      .populate('services', 'name price durationMin')
+      .lean();
+
+    return appts
+      .filter((a) => a.status !== 'cancelled' && a.status !== 'noshow')
+      .map((a) => {
+        const client = a.clientId as { _id: Types.ObjectId; name?: string; phone?: string; notes?: string; history?: unknown[] } | null;
+        const services = (a.services ?? []) as Array<{ _id: Types.ObjectId; name?: string; price?: number; durationMin?: number }>;
+        const start = new Date(a.start);
+        const end = new Date(a.end);
+        const clientName = client?.name ?? 'Client';
+        return {
+          id: a._id.toString(),
+          date: start.toISOString().slice(0, 10),
+          start,
+          end,
+          startTime: start.toISOString().slice(11, 16),
+          clientId: client?._id?.toString() ?? a.clientId?.toString?.() ?? '',
+          clientName,
+          clientInitials: initials(clientName),
+          phone: client?.phone ?? '',
+          services: services.map((s) => ({
+            id: s._id.toString(),
+            name: s.name ?? 'Service',
+            durationMin: s.durationMin ?? 0,
+            priceTnd: s.price ?? 0,
+          })),
+          durationMin: Math.round((end.getTime() - start.getTime()) / MS_PER_MIN),
+          totalTnd: a.price ?? 0,
+          status: a.status,
+          state: staffState(a.status),
+          note: client?.notes || undefined,
+          visitCount: client?.history?.length ?? 0,
+          checkInCode: a.checkInCode ?? null,
+        };
+      });
+  }
 
   /**
    * Appointments for the currently logged-in client, CROSS-SALON (SKILL_client_appointments_dynamic
@@ -633,9 +784,9 @@ export class BookingService {
     await appt.save();
     void this.notifications.dispatch({
       salonId: appt.salonId,
-      userId: appt.stylistId,
+      staffId: appt.stylistId,
       type: SOCKET_EVENTS.APPOINTMENT_CANCELLED,
-      payload: { appointmentId: appt._id.toString() },
+      payload: { appointmentId: appt._id.toString(), stylistId: appt.stylistId.toString(), checkInCode: appt.checkInCode },
     });
     return appt;
   }

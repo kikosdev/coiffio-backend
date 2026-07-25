@@ -9,6 +9,7 @@ import { AuthUser } from '../common/decorators/current-user.decorator';
 export interface DispatchInput {
   salonId: Types.ObjectId | string;
   userId?: Types.ObjectId | string;
+  staffId?: Types.ObjectId | string;
   role?: string;
   /** Also emit to `salon:{id}` — e.g. the POS board, which isn't any one user/role. */
   broadcast?: boolean;
@@ -41,6 +42,7 @@ export class NotificationsService {
     const notif = await this.model.create({
       salonId: new Types.ObjectId(input.salonId),
       userId: input.userId ? new Types.ObjectId(input.userId) : undefined,
+      staffId: input.staffId ? new Types.ObjectId(input.staffId) : undefined,
       role: input.role,
       type: input.type,
       payload: input.payload ?? {},
@@ -50,6 +52,9 @@ export class NotificationsService {
     if (input.userId) {
       const id = input.userId.toString();
       this.gateway.emitToRoom(`user:${id}`, input.type, notif);
+    }
+    if (input.staffId) {
+      const id = input.staffId.toString();
       this.gateway.emitToRoom(`staff:${id}`, input.type, notif);
     }
     if (input.role) this.gateway.emitToRoom(`role:${input.role}`, input.type, notif);
@@ -86,24 +91,26 @@ export class NotificationsService {
     }
   }
 
-  /** Liste scopée : userId == soi OU role match (#4). */
+  /** Liste scopée : identity userId, staff profile staffId, OU role match (#4). */
   async list(scope: SalonScope, user: AuthUser): Promise<NotificationDocument[]> {
-    const userIds = [user.sub, user.staffId].filter(Boolean).map((id) => new Types.ObjectId(id as string));
+    const userId = new Types.ObjectId(user.sub);
+    const staffId = user.staffId ? new Types.ObjectId(user.staffId) : null;
     return this.model
       .find({
         salonId: scope.salonId,
-        $or: [{ userId: { $in: userIds } }, { role: user.role }],
+        $or: [{ userId }, ...(staffId ? [{ staffId }] : []), { role: user.role }],
       })
       .sort({ date: -1 })
       .limit(100);
   }
 
   async markRead(scope: SalonScope, user: AuthUser, id: string): Promise<NotificationDocument> {
-    const userIds = [user.sub, user.staffId].filter(Boolean).map((value) => new Types.ObjectId(value as string));
+    const userId = new Types.ObjectId(user.sub);
+    const staffId = user.staffId ? new Types.ObjectId(user.staffId) : null;
     const n = await this.model.findOne({
       _id: id,
       salonId: scope.salonId,
-      $or: [{ userId: { $in: userIds } }, { role: user.role }],
+      $or: [{ userId }, ...(staffId ? [{ staffId }] : []), { role: user.role }],
     });
     if (!n) throw new NotFoundException('Notification not found.');
     n.read = true;
@@ -112,9 +119,10 @@ export class NotificationsService {
   }
 
   async readAll(scope: SalonScope, user: AuthUser): Promise<{ updated: number }> {
-    const userIds = [user.sub, user.staffId].filter(Boolean).map((id) => new Types.ObjectId(id as string));
+    const userId = new Types.ObjectId(user.sub);
+    const staffId = user.staffId ? new Types.ObjectId(user.staffId) : null;
     const res = await this.model.updateMany(
-      { salonId: scope.salonId, read: false, $or: [{ userId: { $in: userIds } }, { role: user.role }] },
+      { salonId: scope.salonId, read: false, $or: [{ userId }, ...(staffId ? [{ staffId }] : []), { role: user.role }] },
       { $set: { read: true } },
     );
     return { updated: res.modifiedCount ?? 0 };

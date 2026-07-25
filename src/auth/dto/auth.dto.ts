@@ -160,6 +160,13 @@ export class UpdateMeDto {
   phone?: string;
 }
 
+export class UpdateExpoPushTokenDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(512)
+  expoPushToken?: string | null;
+}
+
 export class LoginPinDto {
   @IsString()
   @Length(24, 24)

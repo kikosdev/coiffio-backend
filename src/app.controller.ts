@@ -14,4 +14,16 @@ export class AppController {
       message: 'Service healthy',
     };
   }
+
+  @ApiOperation({ summary: 'Public mobile configuration' })
+  @ApiResponse({ status: 200, description: 'Public config values' })
+  @Get('config/public')
+  publicConfig(): { data: { privacyPolicyUrl: string }; message: string } {
+    return {
+      data: {
+        privacyPolicyUrl: process.env.PRIVACY_POLICY_URL ?? 'https://coiffio.com/privacy',
+      },
+      message: 'OK',
+    };
+  }
 }

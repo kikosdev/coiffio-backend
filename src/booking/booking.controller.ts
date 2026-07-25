@@ -96,7 +96,40 @@ export class BookingController {
     return { data, message: 'OK' };
   }
 
+  @ApiOperation({ summary: 'Get aggregate client home data for the current client' })
+  @ApiResponse({ status: 200, description: 'OK' })
+  @ApiBearerAuth()
+  @Get('client/home')
+  @UseGuards(JwtGuard, RolesGuard)
+  @Roles('client')
+  async clientHome(@CurrentUser() user: AuthUser) {
+    const data = await this.booking.clientHome(user);
+    return { data, message: 'OK' };
+  }
+
   // ─── Backoffice (staff) ──────────────────────────────────────────────────
+
+  @ApiOperation({ summary: "Get the current staff member's hydrated appointments for today" })
+  @ApiResponse({ status: 200, description: 'OK' })
+  @ApiBearerAuth()
+  @Get('staff/today')
+  @UseGuards(JwtGuard, RolesGuard)
+  @Roles('owner', 'manager', 'stylist', 'colorist')
+  async staffToday(@Req() req: Request, @CurrentUser() user: AuthUser, @Query('date') date?: string) {
+    const data = await this.booking.staffToday(getSalonScope(req), user, date);
+    return { data, message: 'OK' };
+  }
+
+  @ApiOperation({ summary: "Get the current staff member's hydrated schedule week" })
+  @ApiResponse({ status: 200, description: 'OK' })
+  @ApiBearerAuth()
+  @Get('staff/schedule/week')
+  @UseGuards(JwtGuard, RolesGuard)
+  @Roles('owner', 'manager', 'stylist', 'colorist')
+  async staffScheduleWeek(@Req() req: Request, @CurrentUser() user: AuthUser, @Query('startDate') startDate?: string) {
+    const data = await this.booking.staffScheduleWeek(getSalonScope(req), user, startDate);
+    return { data, message: 'OK' };
+  }
 
   @ApiOperation({ summary: 'Create a walk-in appointment (staff)' })
   @ApiResponse({ status: 201, description: 'Walk-in created.' })

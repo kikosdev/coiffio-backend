@@ -8,8 +8,11 @@ export class Notification {
   @Prop({ type: Types.ObjectId, ref: 'Salon', required: true, index: true })
   salonId: Types.ObjectId;
 
+  @Prop({ type: Types.ObjectId, ref: 'User', index: true })
+  userId?: Types.ObjectId; // identity recipient (users._id)
+
   @Prop({ type: Types.ObjectId, ref: 'Staff', index: true })
-  userId?: Types.ObjectId; // destinataire précis (ex. stylist)
+  staffId?: Types.ObjectId; // staff profile recipient (staffs._id)
 
   @Prop({ index: true })
   role?: string; // ou diffusion à un rôle (ex. owner)
@@ -47,6 +50,7 @@ export class Notification {
 
 export const NotificationSchema = SchemaFactory.createForClass(Notification);
 NotificationSchema.index({ salonId: 1, userId: 1, read: 1 });
+NotificationSchema.index({ salonId: 1, staffId: 1, read: 1 });
 NotificationSchema.index({ salonId: 1, role: 1, read: 1 });
 // Makes duplicate broadcasts for the same booking impossible at the DB level, not
 // just best-effort in application code.
