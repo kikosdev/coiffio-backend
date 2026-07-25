@@ -42,6 +42,9 @@ export class Notification {
   @Prop()
   body?: string;
 
+  @Prop({ default: false })
+  pushSent: boolean;
+
   // Readers who've acknowledged this notif (POS terminals share one feed — a
   // singular `read` boolean can't represent "seen at this terminal, not at that one").
   @Prop({ type: [String], default: [] })

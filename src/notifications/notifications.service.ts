@@ -1,10 +1,12 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { Notification, NotificationDocument } from './schemas/notification.schema';
 import { NotificationsGateway } from './notifications.gateway';
 import { SalonScope } from '../common/scope/salon-scope';
 import { AuthUser } from '../common/decorators/current-user.decorator';
+import { User, UserDocument } from '../auth/schemas/user.schema';
+import { Staff, StaffDocument } from '../team/schemas/staff.schema';
 
 export interface DispatchInput {
   salonId: Types.ObjectId | string;
@@ -14,6 +16,8 @@ export interface DispatchInput {
   /** Also emit to `salon:{id}` — e.g. the POS board, which isn't any one user/role. */
   broadcast?: boolean;
   type: string;
+  title?: string;
+  body?: string;
   payload?: Record<string, unknown>;
 }
 
@@ -29,8 +33,12 @@ export interface DispatchOnceInput {
 
 @Injectable()
 export class NotificationsService {
+  private readonly logger = new Logger(NotificationsService.name);
+
   constructor(
     @InjectModel(Notification.name) private readonly model: Model<NotificationDocument>,
+    @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
+    @InjectModel(Staff.name) private readonly staffModel: Model<StaffDocument>,
     private readonly gateway: NotificationsGateway,
   ) {}
 
@@ -45,6 +53,8 @@ export class NotificationsService {
       staffId: input.staffId ? new Types.ObjectId(input.staffId) : undefined,
       role: input.role,
       type: input.type,
+      title: input.title,
+      body: input.body,
       payload: input.payload ?? {},
       read: false,
       date: new Date(),
@@ -59,6 +69,7 @@ export class NotificationsService {
     }
     if (input.role) this.gateway.emitToRoom(`role:${input.role}`, input.type, notif);
     if (input.broadcast) this.gateway.emitToRoom(`salon:${input.salonId.toString()}`, input.type, notif);
+    void this.sendPushForDispatch(input, notif);
     return notif;
   }
 
@@ -89,6 +100,109 @@ export class NotificationsService {
       const notif = await this.model.findOne(filter);
       this.gateway.emitToRoom(`salon:${input.salonId.toString()}`, input.type, notif);
     }
+  }
+
+  private async sendPushForDispatch(input: DispatchInput, notif: NotificationDocument): Promise<void> {
+    const users = await this.resolvePushRecipients(input);
+    const tokens = [...new Set(users.map((user) => user.expoPushToken).filter((token): token is string => !!token))];
+    if (tokens.length === 0) return;
+
+    const title = input.title ?? this.defaultPushTitle(input.type);
+    const body = input.body ?? this.defaultPushBody(input);
+    const pushResult = await this.sendExpoPush(tokens, {
+      title,
+      body,
+      data: {
+        notificationId: notif._id.toString(),
+        type: input.type,
+        ...(input.payload ?? {}),
+      },
+    });
+    if (pushResult.invalidTokens.length > 0) {
+      await this.userModel.updateMany({ expoPushToken: { $in: pushResult.invalidTokens } }, { $unset: { expoPushToken: '' } });
+    }
+    notif.pushSent = pushResult.sentCount > 0;
+    await notif.save();
+  }
+
+  private async resolvePushRecipients(input: DispatchInput): Promise<UserDocument[]> {
+    const filters: Record<string, unknown>[] = [];
+    if (input.userId) filters.push({ _id: new Types.ObjectId(input.userId), isActive: true });
+
+    const staffFilters: Record<string, unknown>[] = [];
+    if (input.staffId) {
+      staffFilters.push({ _id: new Types.ObjectId(input.staffId), salonId: new Types.ObjectId(input.salonId), isActive: true });
+    }
+    if (input.role) {
+      staffFilters.push({ salonId: new Types.ObjectId(input.salonId), role: input.role, isActive: true });
+    }
+    if (input.broadcast) {
+      staffFilters.push({ salonId: new Types.ObjectId(input.salonId), isActive: true });
+    }
+    if (staffFilters.length > 0) {
+      const staff = await this.staffModel.find({ $or: staffFilters }).select('userId').lean();
+      const staffUserIds = staff.map((member) => member.userId).filter(Boolean);
+      if (staffUserIds.length > 0) filters.push({ _id: { $in: staffUserIds }, isActive: true });
+    }
+    if (filters.length === 0) return [];
+    return this.userModel.find({ $or: filters, expoPushToken: { $exists: true, $ne: '' } });
+  }
+
+  private defaultPushTitle(type: string): string {
+    if (type.includes('appointment.created')) return 'New appointment';
+    if (type.includes('appointment.cancelled')) return 'Appointment cancelled';
+    return 'Coiffio';
+  }
+
+  private defaultPushBody(input: DispatchInput): string {
+    const clientName = typeof input.payload?.clientName === 'string' ? input.payload.clientName : 'A client';
+    const serviceName = typeof input.payload?.serviceName === 'string' ? input.payload.serviceName : 'booking';
+    const start = input.payload?.start ? new Date(input.payload.start as string | Date) : null;
+    const at = start && !Number.isNaN(start.getTime())
+      ? ` at ${String(start.getUTCHours()).padStart(2, '0')}:${String(start.getUTCMinutes()).padStart(2, '0')}`
+      : '';
+    if (input.type.includes('appointment.created')) return `${clientName} booked ${serviceName}${at}.`;
+    if (input.type.includes('appointment.cancelled')) return `${clientName}'s appointment was cancelled.`;
+    return 'You have a new notification.';
+  }
+
+  private async sendExpoPush(
+    tokens: string[],
+    message: { title: string; body: string; data: Record<string, unknown> },
+  ): Promise<{ invalidTokens: string[]; sentCount: number }> {
+    const invalidTokens: string[] = [];
+    let sentCount = 0;
+    for (let i = 0; i < tokens.length; i += 100) {
+      const chunk = tokens.slice(i, i + 100);
+      try {
+        const res = await fetch('https://exp.host/--/api/v2/push/send', {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Accept-encoding': 'gzip, deflate',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(chunk.map((to) => ({
+            to,
+            sound: 'default',
+            priority: 'high',
+            title: message.title,
+            body: message.body,
+            data: message.data,
+          }))),
+        });
+        const json = await res.json().catch(() => null) as { data?: Array<{ status?: string; details?: { error?: string } }> } | null;
+        json?.data?.forEach((ticket, index) => {
+          if (ticket.status === 'ok') sentCount += 1;
+          if (ticket.status === 'error' && ticket.details?.error === 'DeviceNotRegistered') {
+            invalidTokens.push(chunk[index]);
+          }
+        });
+      } catch (err) {
+        this.logger.warn(`Expo push send failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return { invalidTokens, sentCount };
   }
 
   /** Liste scopée : identity userId, staff profile staffId, OU role match (#4). */

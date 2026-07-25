@@ -65,7 +65,7 @@ PRIVACY_POLICY_URL=https://coiffio.com/privacy
 | **Sales** | `POST /sales` · `GET /sales` |
 | **Orders** | Cart + order lifecycle |
 | **Clients** | Client CRM |
-| **Notifications** | WebSocket + notification store |
+| **Notifications** | WebSocket + notification store + Expo push delivery to stored user tokens |
 | **Overview** | Dashboard aggregates · `GET /owner/hq` mobile aggregate |
 | **Settings** | Salon config, roles, business hours |
 | **Public** | Unauthenticated storefront data (landing, team, services, testimonials) · `GET /config/public` |
@@ -127,6 +127,7 @@ No dummy data is used. All data is real MongoDB documents.
 - **Stylist + colorist are both bookable.** The booking domain treats `role: { $in: ['stylist','colorist'] }` everywhere. `owner`/`manager` are administrative only.
 - **Check-in codes are stored.** New appointments receive a `BXXX` `checkInCode` that is unique per salon/day using `appointments(salonId,startDay,checkInCode)`.
 - **Notifications scope staff separately from users.** Realtime dispatch can target `user:{userId}`, `staff:{staffId}`, `role:{role}`, or `salon:{salonId}`; persisted notifications store `staffId` when the recipient is a staff profile.
+- **Expo push delivery is tied to stored user tokens.** Mobile clients register tokens with `/auth/me/push-token`; notification dispatch resolves user/staff/role recipients, sends to Expo, and clears tokens reported as `DeviceNotRegistered`.
 - **Owner deactivation is guarded.** `/auth/me/deactivate` blocks the last active owner in a salon so ownership cannot be orphaned.
 - **Date strings are timezone-naive.** Business-day strings (`YYYY-MM-DD`) are built and compared without timezone conversion on the backend. The frontend must use `localDateISO()` (never `toISOString()`) to avoid off-by-one-day bugs for UTC+ timezones.
 - **`salonId` single-tenant.** All data is scoped to one salon. Multi-salon support is a `// TODO` (some screens show a "Locked" teaser in the design).

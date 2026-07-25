@@ -550,17 +550,31 @@ export class BookingService {
       serviceName: meta.serviceName,
       checkInCode: appt.checkInCode,
     };
-    void this.notifications.dispatch({ salonId: appt.salonId, staffId: appt.stylistId, type: SOCKET_EVENTS.APPOINTMENT_CREATED, payload });
-    void this.notifications.dispatch({ salonId: appt.salonId, role: 'owner', type: SOCKET_EVENTS.APPOINTMENT_CREATED, payload });
+    // appt.start is stored UTC-labeled-as-Tunis (dateAtMin convention) — read UTC components
+    // directly, no offset, to match the wall-clock time it actually represents.
+    const hh = String(appt.start.getUTCHours()).padStart(2, '0');
+    const mm = String(appt.start.getUTCMinutes()).padStart(2, '0');
+    void this.notifications.dispatch({
+      salonId: appt.salonId,
+      staffId: appt.stylistId,
+      type: SOCKET_EVENTS.APPOINTMENT_CREATED,
+      title: 'New appointment',
+      body: `${meta.clientName} booked ${meta.serviceName} at ${hh}:${mm}`,
+      payload,
+    });
+    void this.notifications.dispatch({
+      salonId: appt.salonId,
+      role: 'owner',
+      type: SOCKET_EVENTS.APPOINTMENT_CREATED,
+      title: 'New appointment',
+      body: `${meta.clientName} booked ${meta.serviceName} at ${hh}:${mm}`,
+      payload,
+    });
     // Broadcast too (SKILL_fix_pos_board_notifications) — the POS kiosk isn't signed in as
     // any specific user/role that the two dispatches above would reach (bb_pos_token has
     // neither `sub` nor `role`), so it must join `salon:{id}` directly to see this at all.
     // Deduplicated by groupId (SKILL_fix_pos_board_notifs_FINAL) — one booking, one notif,
     // even if createAppointment is ever called more than once for the same groupId.
-    // appt.start is stored UTC-labeled-as-Tunis (dateAtMin convention) — read UTC components
-    // directly, no offset, to match the wall-clock time it actually represents.
-    const hh = String(appt.start.getUTCHours()).padStart(2, '0');
-    const mm = String(appt.start.getUTCMinutes()).padStart(2, '0');
     void this.notifications.dispatchOnce({
       salonId: appt.salonId,
       groupId: appt.groupId,
@@ -786,6 +800,8 @@ export class BookingService {
       salonId: appt.salonId,
       staffId: appt.stylistId,
       type: SOCKET_EVENTS.APPOINTMENT_CANCELLED,
+      title: 'Appointment cancelled',
+      body: 'An appointment was cancelled.',
       payload: { appointmentId: appt._id.toString(), stylistId: appt.stylistId.toString(), checkInCode: appt.checkInCode },
     });
     return appt;
