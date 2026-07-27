@@ -25,6 +25,7 @@ import {
 } from './dto/booking.dto';
 import { SalonScope } from '../common/scope/salon-scope';
 import { AuthUser } from '../common/decorators/current-user.decorator';
+import { normalizeIdentifier } from '../auth/identifier.util';
 import { signAppointment, verifyAppointmentToken } from './signed-link.util';
 import { SOCKET_EVENTS } from '../common/socket-events';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -100,6 +101,20 @@ function initials(name: string): string {
 
 function staffState(status: string): 'waiting' | 'in_chair' | 'done' {
   return status === 'completed' ? 'done' : 'waiting';
+}
+
+function normalizedPhone(value?: string): string | undefined {
+  if (!value?.trim()) return undefined;
+  return normalizeIdentifier(value).value;
+}
+
+function flexiblePhoneRegex(value: string): RegExp | undefined {
+  const normalized = normalizedPhone(value);
+  if (!normalized) return undefined;
+  const digits = normalized.replace(/\D/g, '').replace(/^216/, '');
+  if (!digits) return undefined;
+  const sep = '[\\s\\-().]*';
+  return new RegExp(`^(?:\\+?216|00216)?${sep}${digits.split('').join(sep)}$`);
 }
 
 @Injectable()
@@ -322,13 +337,30 @@ export class BookingService {
     if (input.clientId) {
       const c = await this.clientModel.findOne({ _id: input.clientId, salonId: scope.salonId });
       if (!c) throw new BadRequestException('Client not found.');
+      if (input.userId && (!c.userId || c.userId.toString() === input.userId)) {
+        c.userId = new Types.ObjectId(input.userId);
+      }
+      if (input.clientName?.trim()) {
+        c.name = input.clientName.trim();
+      }
+      const phone = normalizedPhone(input.clientPhone);
+      if (phone && c.phone !== phone) {
+        const duplicate = await this.clientModel.findOne({ _id: { $ne: c._id }, salonId: scope.salonId, phone });
+        if (!duplicate) c.phone = phone;
+      }
+      if (input.clientEmail && !c.email) {
+        c.email = input.clientEmail.toLowerCase();
+      }
+      await c.save();
       return c._id as Types.ObjectId;
     }
     if (!input.clientName || !input.clientPhone) {
       throw new BadRequestException('Provide clientId, or clientName + clientPhone.');
     }
+    const phone = normalizedPhone(input.clientPhone);
+    if (!phone) throw new BadRequestException('Provide a valid clientPhone.');
     // merge-on-phone (#10) : un seul Client par phone dans le salon.
-    const existing = await this.clientModel.findOne({ salonId: scope.salonId, phone: input.clientPhone });
+    const existing = await this.clientModel.findOne({ salonId: scope.salonId, phone });
     if (existing) {
       if (input.userId && (!existing.userId || existing.userId.toString() === input.userId)) {
         existing.userId = new Types.ObjectId(input.userId);
@@ -343,7 +375,7 @@ export class BookingService {
       salonId: scope.salonId,
       userId: input.userId ? new Types.ObjectId(input.userId) : null,
       name: input.clientName,
-      phone: input.clientPhone,
+      phone,
       email: input.clientEmail ?? '',
       commsConsent: true,
       preferredChannel: 'email',
@@ -388,10 +420,9 @@ export class BookingService {
     const startDay = start.toISOString().slice(0, 10);
 
     const stylist = await this.assertStylist(scope, dto.stylistId);
-    const hasContactIdentity = !!dto.clientName && !!dto.clientPhone;
     const clientInput: ResolveClientInput =
-      user?.role === 'client' && user.clientId && !dto.clientId && !hasContactIdentity
-        ? { ...dto, clientId: user.clientId }
+      user?.role === 'client' && user.clientId && !dto.clientId
+        ? { ...dto, clientId: user.clientId, userId: user.sub }
         : { ...dto, userId: user?.role === 'client' ? user.sub : undefined };
     const clientId = await this.resolveClient(scope, clientInput);
     const groupId = randomUUID();
@@ -673,9 +704,16 @@ export class BookingService {
    * booked at — collect them all rather than scoping to a single salon.
    */
   async listMine(user: AuthUser, scope: 'upcoming' | 'history'): Promise<Record<string, unknown>[]> {
-    const clientIdentityFilter: FilterQuery<ClientDocument> = user.phone
-      ? { $or: [{ userId: user.sub }, { phone: user.phone }] }
-      : { userId: user.sub };
+    const identity: FilterQuery<ClientDocument>[] = [{ userId: user.sub }];
+    if (user.clientId) identity.push({ _id: user.clientId });
+    if (user.phone) {
+      identity.push({ phone: user.phone });
+      const phone = normalizedPhone(user.phone);
+      if (phone && phone !== user.phone) identity.push({ phone });
+      const phoneRegex = flexiblePhoneRegex(user.phone);
+      if (phoneRegex) identity.push({ phone: phoneRegex });
+    }
+    const clientIdentityFilter: FilterQuery<ClientDocument> = { $or: identity };
     const clientIds = await this.clientModel.find(clientIdentityFilter).distinct('_id');
     if (!clientIds.length) return [];
 
