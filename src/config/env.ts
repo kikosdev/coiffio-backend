@@ -22,9 +22,7 @@ let cached: AppEnv | null = null;
 
 export function JwtStrategy(): AppEnv {
   if (cached) return cached;
-console.log('check env ', process.env)
   const missing = REQUIRED.filter((k) => !process.env[k] || process.env[k]!.trim() === '');
-  console.log('check misding ', missing)
   if (missing.length) {
     throw new Error(
       `Missing required environment variables: ${missing.join(', ')}. ` +
