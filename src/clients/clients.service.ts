@@ -5,6 +5,7 @@ import { Client, ClientDocument, PreferredChannel } from './schemas/client.schem
 import { CreateClientDto, UpdateClientDto } from './dto/client.dto';
 import { SalonScope } from '../common/scope/salon-scope';
 import { Appointment, AppointmentDocument } from '../booking/schemas/appointment.schema';
+import { ClientProfileService } from '../identity/client-profile.service';
 
 export interface ClientStats {
   visitCount: number;
@@ -57,6 +58,7 @@ export class ClientsService {
   constructor(
     @InjectModel(Client.name) private readonly model: Model<ClientDocument>,
     @InjectModel(Appointment.name) private readonly apptModel: Model<AppointmentDocument>,
+    private readonly clientProfiles: ClientProfileService,
   ) {}
 
   /**
@@ -183,10 +185,16 @@ export class ClientsService {
       if (dto.preferredChannel !== undefined) existing.preferredChannel = dto.preferredChannel;
       if (dto.notes !== undefined) existing.notes = dto.notes;
       await existing.save();
+      if (!existing.profileId) {
+        await this.clientProfiles.attachProfile(scope.salonId, (existing._id as Types.ObjectId).toString(), existing.phone, {
+          name: existing.name,
+          email: existing.email,
+        });
+      }
       return existing;
     }
 
-    return this.model.create({
+    const created = await this.model.create({
       salonId: scope.salonId,
       name: dto.name,
       phone: dto.phone,
@@ -197,6 +205,11 @@ export class ClientsService {
       registered: false,
       history: [],
     });
+    await this.clientProfiles.attachProfile(scope.salonId, (created._id as Types.ObjectId).toString(), created.phone, {
+      name: created.name,
+      email: created.email,
+    });
+    return created;
   }
 
   async update(scope: SalonScope, id: string, dto: UpdateClientDto): Promise<ClientDocument> {

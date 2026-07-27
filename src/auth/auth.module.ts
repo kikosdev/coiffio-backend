@@ -11,11 +11,13 @@ import { Salon, SalonSchema } from '../seed/schemas/salon.schema';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { JwtStrategy } from './jwt.strategy';
+import { IdentityModule } from '../identity/identity.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     PassportModule,
+    IdentityModule,
     MongooseModule.forFeature([
       { name: User.name,         schema: UserSchema },
       { name: Staff.name,        schema: StaffSchema },

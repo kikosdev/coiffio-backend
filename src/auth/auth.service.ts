@@ -15,6 +15,7 @@ import { Schedule, ScheduleDocument } from '../team/schemas/schedule.schema';
 import { StaffProfile, StaffProfileDocument } from '../team/schemas/staff-profile.schema';
 import { Client, ClientDocument } from '../clients/schemas/client.schema';
 import { Salon, SalonDocument } from '../seed/schemas/salon.schema';
+import { ClientProfileService } from '../identity/client-profile.service';
 import { AuthUser, Role } from '../common/decorators/current-user.decorator';
 import { normalizeIdentifier } from './identifier.util';
 import {
@@ -65,6 +66,7 @@ export class AuthService {
     @InjectModel(Client.name)       private readonly clientModel:   Model<ClientDocument>,
     @InjectModel(Salon.name)        private readonly salonModel:    Model<SalonDocument>,
     private readonly jwt: JwtService,
+    private readonly clientProfiles: ClientProfileService,
   ) {}
 
   // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -120,12 +122,12 @@ export class AuthService {
     return this.jwt.sign(payload);
   }
 
-  private async resolveSalonId(): Promise<Types.ObjectId> {
+  private async resolveSalonId(): Promise<string> {
     const fromEnv = process.env.DEFAULT_SALON_ID;
-    if (fromEnv && Types.ObjectId.isValid(fromEnv)) return new Types.ObjectId(fromEnv);
+    if (fromEnv && Types.ObjectId.isValid(fromEnv)) return fromEnv;
     const salon = await this.salonModel.findOne().sort({ createdAt: 1 });
     if (!salon) throw new BadRequestException('No salon configured. Run the seed first.');
-    return salon._id as Types.ObjectId;
+    return (salon._id as Types.ObjectId).toString();
   }
 
   // ─── Login ──────────────────────────────────────────────────────────────────
@@ -242,6 +244,13 @@ export class AuthService {
         email: dto.email?.toLowerCase() ?? '',
       });
     }
+    if (!client.profileId) {
+      await this.clientProfiles.attachProfile(salonId, (client._id as Types.ObjectId).toString(), client.phone, {
+        name: client.name,
+        email: client.email,
+        userId: (user._id as Types.ObjectId).toString(),
+      });
+    }
 
     return { token: this.issueToken(user, { client }), user: this.toPublicFromClient(user, client) };
   }
@@ -250,7 +259,6 @@ export class AuthService {
 
   async createStaff(salonId: string, dto: CreateStaffAuthDto): Promise<{ user: PublicUser }> {
     const id = normalizeIdentifier(dto.identifier);
-    const salonObjId = new Types.ObjectId(salonId);
 
     const existing = await this.userModel.findOne({ identifier: id.value });
     if (existing) throw new ConflictException('An account with this identifier already exists.');
@@ -265,7 +273,7 @@ export class AuthService {
     });
 
     const staff = await this.staffModel.create({
-      salonId: salonObjId,
+      salonId,
       userId: userDoc._id,
       name: dto.name,
       email: dto.email?.toLowerCase().trim() ?? '',
@@ -277,14 +285,14 @@ export class AuthService {
     });
 
     await this.scheduleModel.updateOne(
-      { salonId: salonObjId, stylistId: staff._id },
+      { salonId, stylistId: staff._id },
       { $setOnInsert: { weekly: [], overrides: [] } },
       { upsert: true },
     );
 
     if (['stylist', 'colorist'].includes(dto.role) || dto.level || dto.capabilities || dto.baseRate != null || dto.commissionPct != null) {
       await this.profileModel.create({
-        salonId: salonObjId,
+        salonId,
         userId: staff._id,
         level: dto.level ?? 'senior',
         capabilities: dto.capabilities ?? [],

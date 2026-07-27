@@ -16,6 +16,7 @@ import { StaffProfile, StaffProfileDocument } from '../team/schemas/staff-profil
 import { Client, ClientDocument } from '../clients/schemas/client.schema';
 import { Staff, StaffDocument } from '../team/schemas/staff.schema';
 import { Salon, SalonDocument } from '../seed/schemas/salon.schema';
+import { ClientProfileService } from '../identity/client-profile.service';
 import {
   AvailabilityQueryDto,
   AvailabilityTimelineQueryDto,
@@ -81,6 +82,7 @@ export class BookingService {
     @InjectModel(Salon.name) private readonly salonModel: Model<SalonDocument>,
     @InjectConnection() private readonly connection: Connection,
     private readonly notifications: NotificationsService,
+    private readonly clientProfiles: ClientProfileService,
   ) {}
 
   // ─── Services helper ──────────────────────────────────────────────────────
@@ -314,6 +316,10 @@ export class BookingService {
       registered: false,
       notes: '',
       history: [],
+    });
+    await this.clientProfiles.attachProfile(scope.salonId, (created._id as Types.ObjectId).toString(), created.phone, {
+      name: created.name,
+      email: created.email,
     });
     return created._id as Types.ObjectId;
   }

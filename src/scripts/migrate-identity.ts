@@ -29,7 +29,7 @@ const UserSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const ClientSchema = new mongoose.Schema({
-  salonId:  { type: Types.ObjectId, ref: 'Salon', required: true },
+  salonId:  { type: String, required: true },
   userId:   { type: Types.ObjectId, ref: 'User', default: null },
   name:     { type: String, required: true },
   phone:    { type: String, required: true },
@@ -42,7 +42,7 @@ const ClientSchema = new mongoose.Schema({
 ClientSchema.index({ salonId: 1, phone: 1 }, { unique: true });
 
 const StaffSchema = new mongoose.Schema({
-  salonId:  { type: Types.ObjectId, ref: 'Salon', required: true },
+  salonId:  { type: String, required: true },
   userId:   { type: Types.ObjectId, ref: 'User', required: false }, // nullable during migration
   name:     { type: String, required: true },
   email:    { type: String },

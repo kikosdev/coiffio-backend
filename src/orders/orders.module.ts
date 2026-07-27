@@ -9,10 +9,12 @@ import { Client, ClientSchema } from '../clients/schemas/client.schema';
 import { OrdersService } from './orders.service';
 import { OrdersController } from './orders.controller';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { IdentityModule } from '../identity/identity.module';
 
 @Module({
   imports: [
     NotificationsModule,
+    IdentityModule,
     MongooseModule.forFeature([
       { name: Cart.name, schema: CartSchema },
       { name: Order.name, schema: OrderSchema },

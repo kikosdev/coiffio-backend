@@ -20,8 +20,8 @@ export interface ClientHistoryEntry {
  */
 @Schema({ timestamps: true })
 export class Client {
-  @Prop({ type: Types.ObjectId, ref: 'Salon', required: true, index: true })
-  salonId: Types.ObjectId;
+  @Prop({ type: String, required: true, index: true })
+  salonId: string;
 
   // Lien vers users (Identity). NULL = walk-in sans compte.
   @Prop({ type: Types.ObjectId, ref: 'User', default: null })
@@ -45,6 +45,11 @@ export class Client {
 
   @Prop({ default: '' })
   notes: string;
+
+  // Lien vers ClientProfile (GLOBAL, Prompt 4) — nullable, sparse. N'affecte PAS
+  // l'index unique (salonId, phone) ci-dessous, qui reste la clé locale au tenant.
+  @Prop({ type: String, index: true, sparse: true })
+  profileId?: string;
 
   @Prop({
     type: [

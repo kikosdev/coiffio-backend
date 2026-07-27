@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';
+import { Document } from 'mongoose';
 
 export type ServiceDocument = Service & Document;
 
@@ -11,8 +11,8 @@ export type ServiceGender = 'men' | 'women' | 'universal';
  */
 @Schema({ timestamps: true })
 export class Service {
-  @Prop({ type: Types.ObjectId, ref: 'Salon', required: true, index: true })
-  salonId: Types.ObjectId;
+  @Prop({ type: String, required: true, index: true })
+  salonId: string;
 
   @Prop({ required: true })
   name: string;

@@ -16,8 +16,13 @@ export interface PaymentLine {
 /** Encaissement (Sprint 5). `refunded` + `refundedBy/At` = refund owner-only (#8). */
 @Schema({ timestamps: true })
 export class Payment {
-  @Prop({ type: Types.ObjectId, ref: 'Salon', required: true, index: true })
-  salonId: Types.ObjectId;
+  @Prop({ type: String, required: true, index: true })
+  salonId: string;
+
+  // LOCATION_SCOPED (Prompt 3). Optionnel : absent des documents existants tant que le
+  // backfill (Prompt 6) n'a pas tourné, injecté automatiquement par le plugin en écriture.
+  @Prop({ type: String, index: true })
+  locationId?: string;
 
   @Prop({ type: Types.ObjectId, ref: 'Appointment' })
   appointmentId?: Types.ObjectId;

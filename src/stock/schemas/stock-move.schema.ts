@@ -6,8 +6,13 @@ export type MoveType = 'in' | 'out';
 
 @Schema({ timestamps: true })
 export class StockMove {
-  @Prop({ type: Types.ObjectId, ref: 'Salon', required: true, index: true })
-  salonId: Types.ObjectId;
+  @Prop({ type: String, required: true, index: true })
+  salonId: string;
+
+  // LOCATION_SCOPED (Prompt 3). Optionnel : absent des documents existants tant que le
+  // backfill (Prompt 6) n'a pas tourné, injecté automatiquement par le plugin en écriture.
+  @Prop({ type: String, index: true })
+  locationId?: string;
 
   @Prop({ type: Types.ObjectId, ref: 'Product', required: true, index: true })
   productId: Types.ObjectId;

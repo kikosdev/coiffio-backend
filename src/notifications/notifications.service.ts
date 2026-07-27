@@ -7,7 +7,7 @@ import { SalonScope } from '../common/scope/salon-scope';
 import { AuthUser } from '../common/decorators/current-user.decorator';
 
 export interface DispatchInput {
-  salonId: Types.ObjectId | string;
+  salonId: string;
   userId?: Types.ObjectId | string;
   role?: string;
   /** Also emit to `salon:{id}` — e.g. the POS board, which isn't any one user/role. */
@@ -17,7 +17,7 @@ export interface DispatchInput {
 }
 
 export interface DispatchOnceInput {
-  salonId: Types.ObjectId | string;
+  salonId: string;
   /** Dedup key — one booking (possibly several appointment rows) = one notification. */
   groupId: string;
   type: string;
@@ -39,7 +39,7 @@ export class NotificationsService {
    */
   async dispatch(input: DispatchInput): Promise<NotificationDocument> {
     const notif = await this.model.create({
-      salonId: new Types.ObjectId(input.salonId),
+      salonId: input.salonId,
       userId: input.userId ? new Types.ObjectId(input.userId) : undefined,
       role: input.role,
       type: input.type,
@@ -60,7 +60,7 @@ export class NotificationsService {
    * N'émet sur le socket QUE lors d'un véritable premier insert.
    */
   async dispatchOnce(input: DispatchOnceInput): Promise<void> {
-    const filter = { salonId: new Types.ObjectId(input.salonId), type: input.type, groupId: input.groupId };
+    const filter = { salonId: input.salonId, type: input.type, groupId: input.groupId };
     const res = await this.model.updateOne(
       filter,
       {
@@ -120,14 +120,14 @@ export class NotificationsService {
    */
   async listForSalon(salonId: string): Promise<NotificationDocument[]> {
     return this.model
-      .find({ salonId: new Types.ObjectId(salonId), groupId: { $exists: true } })
+      .find({ salonId, groupId: { $exists: true } })
       .sort({ date: -1 })
       .limit(50);
   }
 
   /** Marks broadcasts as seen by this specific POS terminal/staff — shared feed, per-reader ack. */
   async markReadByReader(salonId: string, readerId: string, ids?: string[]): Promise<{ updated: number }> {
-    const filter: Record<string, unknown> = { salonId: new Types.ObjectId(salonId) };
+    const filter: Record<string, unknown> = { salonId };
     if (ids?.length) filter._id = { $in: ids };
     const res = await this.model.updateMany(filter, { $addToSet: { readBy: readerId } });
     return { updated: res.modifiedCount ?? 0 };

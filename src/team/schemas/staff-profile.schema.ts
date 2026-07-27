@@ -15,8 +15,8 @@ export type StaffLevel = 'master' | 'senior' | 'apprentice';
  */
 @Schema({ timestamps: true })
 export class StaffProfile {
-  @Prop({ type: Types.ObjectId, ref: 'Salon', required: true, index: true })
-  salonId: Types.ObjectId;
+  @Prop({ type: String, required: true, index: true })
+  salonId: string;
 
   @Prop({ type: Types.ObjectId, ref: 'Staff', required: true, index: true })
   userId: Types.ObjectId;

@@ -5,8 +5,8 @@ export type NotificationDocument = Notification & Document;
 
 @Schema({ timestamps: true })
 export class Notification {
-  @Prop({ type: Types.ObjectId, ref: 'Salon', required: true, index: true })
-  salonId: Types.ObjectId;
+  @Prop({ type: String, required: true, index: true })
+  salonId: string;
 
   @Prop({ type: Types.ObjectId, ref: 'Staff', index: true })
   userId?: Types.ObjectId; // destinataire précis (ex. stylist)

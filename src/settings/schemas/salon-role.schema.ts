@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';
+import { Document } from 'mongoose';
 
 export type SalonRoleDocument = SalonRole & Document;
 
@@ -10,8 +10,8 @@ export type SalonRoleDocument = SalonRole & Document;
  */
 @Schema({ timestamps: true })
 export class SalonRole {
-  @Prop({ type: Types.ObjectId, ref: 'Salon', required: true, index: true })
-  salonId: Types.ObjectId;
+  @Prop({ type: String, required: true, index: true })
+  salonId: string;
 
   @Prop({ required: true, trim: true })
   name: string;

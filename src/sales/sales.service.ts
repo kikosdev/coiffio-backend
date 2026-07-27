@@ -237,7 +237,7 @@ export class SalesService {
     return this.saleModel.aggregate<BestSeller>([
       {
         $match: {
-          salonId: new Types.ObjectId(scope.salonId),
+          salonId: scope.salonId,
           source: 'pos',
           voided: { $ne: true },
           date: { $gte: from, $lte: to },

@@ -26,8 +26,8 @@ export interface PublicProfile {
 
 @Schema({ timestamps: true })
 export class Staff {
-  @Prop({ type: Types.ObjectId, ref: 'Salon', required: true, index: true })
-  salonId: Types.ObjectId;
+  @Prop({ type: String, required: true, index: true })
+  salonId: string;
 
   // Lien vers users (Identity Service). OBLIGATOIRE — tout staff a un compte.
   @Prop({ type: Types.ObjectId, ref: 'User', required: true, index: true })
@@ -56,6 +56,15 @@ export class Staff {
 
   @Prop({ default: true })
   isActive: boolean;
+
+  // Many-to-many (décision #7, SKILL_saas_sprint1_tenant_isolation_v2) — le staff reste
+  // mono-tenant mais peut tourner sur plusieurs sites. Peuplé par le backfill (Prompt 6) ;
+  // vide par défaut jusque-là, PAS de donnée existante réécrite ici.
+  @Prop({ type: [String], default: [] })
+  locationIds: string[];
+
+  @Prop({ type: String })
+  defaultLocationId?: string;
 
   // Self-toggle — stops the stylist from being offered for new public bookings
   // (availability engine + marketplace "available" badge) without deactivating the account.

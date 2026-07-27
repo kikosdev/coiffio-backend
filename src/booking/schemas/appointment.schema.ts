@@ -14,8 +14,15 @@ export type AppointmentSource = 'online' | 'walkin' | 'phone';
  */
 @Schema({ timestamps: true })
 export class Appointment {
-  @Prop({ type: Types.ObjectId, ref: 'Salon', required: true, index: true })
-  salonId: Types.ObjectId;
+  @Prop({ type: String, required: true, index: true })
+  salonId: string;
+
+  // LOCATION_SCOPED (SKILL_saas_sprint1_tenant_isolation_v2, Prompt 3). Absent des
+  // documents existants tant que le backfill (Prompt 6) n'a pas tourné — optionnel ici
+  // pour ne rien casser sur les données actuelles, injecté automatiquement par le plugin
+  // sur toute nouvelle écriture.
+  @Prop({ type: String, index: true })
+  locationId?: string;
 
   @Prop({ type: Types.ObjectId, ref: 'Staff', required: true, index: true })
   stylistId: Types.ObjectId;

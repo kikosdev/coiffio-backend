@@ -94,7 +94,7 @@ export class MarketplaceService {
       .lean();
 
     // Plusieurs services peuvent matcher dans un même salon (cas category) — garder le moins cher.
-    const bySalon = new Map<string, { salonId: Types.ObjectId; name: string; price: number; durationMin: number }>();
+    const bySalon = new Map<string, { salonId: string; name: string; price: number; durationMin: number }>();
     for (const s of services) {
       const key = s.salonId.toString();
       const cur = bySalon.get(key);

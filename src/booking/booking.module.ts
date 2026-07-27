@@ -10,10 +10,12 @@ import { Salon, SalonSchema } from '../seed/schemas/salon.schema';
 import { BookingService } from './booking.service';
 import { BookingController } from './booking.controller';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { IdentityModule } from '../identity/identity.module';
 
 @Module({
   imports: [
     NotificationsModule,
+    IdentityModule,
     MongooseModule.forFeature([
       { name: Appointment.name, schema: AppointmentSchema },
       { name: Service.name, schema: ServiceSchema },

@@ -12,6 +12,7 @@ import { CheckoutDto } from './dto/orders.dto';
 import { SalonScope } from '../common/scope/salon-scope';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SOCKET_EVENTS } from '../common/socket-events';
+import { ClientProfileService } from '../identity/client-profile.service';
 
 const CART_TTL_DAYS = 7;
 const TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
@@ -40,6 +41,7 @@ export class OrdersService {
     @InjectModel(Client.name) private readonly clientModel: Model<ClientDocument>,
     @InjectConnection() private readonly connection: Connection,
     private readonly notifications: NotificationsService,
+    private readonly clientProfiles: ClientProfileService,
   ) {}
 
   async shopProducts(scope: SalonScope): Promise<ProductDocument[]> {
@@ -235,6 +237,10 @@ export class OrdersService {
       registered: false,
       notes: '',
       history: [],
+    });
+    await this.clientProfiles.attachProfile(scope.salonId, (created._id as Types.ObjectId).toString(), created.phone, {
+      name: created.name,
+      email: created.email,
     });
     return created._id as Types.ObjectId;
   }

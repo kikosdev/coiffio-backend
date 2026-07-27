@@ -28,8 +28,8 @@ export interface LeaveConflict {
  */
 @Schema({ timestamps: true })
 export class LeaveRequest {
-  @Prop({ type: Types.ObjectId, ref: 'Salon', required: true, index: true })
-  salonId: Types.ObjectId;
+  @Prop({ type: String, required: true, index: true })
+  salonId: string;
 
   @Prop({ type: Types.ObjectId, ref: 'Staff', required: true, index: true })
   stylistId: Types.ObjectId;
