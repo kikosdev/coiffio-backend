@@ -12,12 +12,16 @@ import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { JwtStrategy } from './jwt.strategy';
 import { IdentityModule } from '../identity/identity.module';
+import { LocationsModule } from '../locations/locations.module';
+import { EmailModule } from '../email/email.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     PassportModule,
     IdentityModule,
+    LocationsModule,
+    EmailModule,
     MongooseModule.forFeature([
       { name: User.name,         schema: UserSchema },
       { name: Staff.name,        schema: StaffSchema },

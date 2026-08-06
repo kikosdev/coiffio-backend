@@ -1,26 +1,23 @@
 import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
 import { Request } from 'express';
 import { AuthUser } from '../decorators/current-user.decorator';
 
 /**
- * Coquille fonctionnelle (Sprint 0). Vérifie un JWT (cookie `access_token` ou header
- * Authorization Bearer), attache `req.user`. La délivrance des tokens arrive au Sprint 1.
+ * Sprint 2 v2 Prompt 2 : ne décode plus le JWT lui-même. `TenantContextMiddleware`
+ * (Express-level, s'exécute AVANT tout guard Nest) est désormais le SEUL endroit qui
+ * décode le token et peuple `req.user` — la résolution du tenant/rôle actif demande la
+ * logique memberships (header/sous-domaine/membership unique), et la refaire ici
+ * indépendamment produirait un `req.user` DIFFÉRENT (potentiellement divergent) de celui
+ * que `TenantContext` utilise pour scoper les requêtes Mongo. Ce guard ne fait donc plus
+ * que vérifier qu'une résolution a eu lieu — 401 sinon (token absent/invalide/expiré, ou
+ * résolution tenant qui aurait déjà throw plus haut dans le pipeline).
  */
 @Injectable()
 export class JwtGuard implements CanActivate {
-  constructor(private readonly jwt: JwtService) {}
-
-  async canActivate(context: ExecutionContext): Promise<boolean> {
+  canActivate(context: ExecutionContext): boolean {
     const req = context.switchToHttp().getRequest<Request & { user?: AuthUser }>();
-    const token = extractToken(req);
-    if (!token) throw new UnauthorizedException('Authentication required.');
-    try {
-      req.user = await this.jwt.verifyAsync<AuthUser>(token);
-      return true;
-    } catch {
-      throw new UnauthorizedException('Invalid or expired token.');
-    }
+    if (!req.user) throw new UnauthorizedException('Authentication required.');
+    return true;
   }
 }
 

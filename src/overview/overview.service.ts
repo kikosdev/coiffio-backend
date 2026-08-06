@@ -11,8 +11,11 @@ import { LeaveRequest, LeaveRequestDocument } from '../team/schemas/leave-reques
 import { Staff, StaffDocument } from '../team/schemas/staff.schema';
 import { Client, ClientDocument } from '../clients/schemas/client.schema';
 import { Service, ServiceDocument } from '../services/schemas/service.schema';
-import { effectiveWindow } from '../booking/availability.util';
-import { SalonScope } from '../common/scope/salon-scope';
+import { addDaysIso, effectiveWindow, todayIso, weekdayOf } from '../booking/availability.util';
+import { getTenantContext } from '../common/tenant/tenant-context';
+import { Salon, SalonDocument } from '../seed/schemas/salon.schema';
+import { StaffProfile, StaffProfileDocument } from '../team/schemas/staff-profile.schema';
+import { computeSalonIsOpen } from '../common/time/salon-clock';
 
 const ACTIVE = ['booked', 'confirmed'];
 
@@ -47,6 +50,25 @@ export interface OverviewResult {
   revenueByMethod: { cash: number; card: number; mobile: number };
 }
 
+export interface OwnerHqResult {
+  id: string;
+  name: string;
+  address: string;
+  hoursToday: string | null;
+  isOpen: boolean;
+  todayRevenue: number;
+  revenueChangePct: number;
+  bookingCount: number;
+  barbersOn: number;
+  barbersTotal: number;
+  occupancyPct: number;
+  team: { id: string; name: string; initials: string; isPro: boolean; status: 'active' | 'off'; todayCount: number }[];
+}
+
+function initials(name: string): string {
+  return name.split(' ').map((w) => w[0] ?? '').join('').slice(0, 2).toUpperCase();
+}
+
 @Injectable()
 export class OverviewService {
   constructor(
@@ -60,15 +82,78 @@ export class OverviewService {
     @InjectModel(Staff.name) private readonly staffModel: Model<StaffDocument>,
     @InjectModel(Client.name) private readonly clientModel: Model<ClientDocument>,
     @InjectModel(Service.name) private readonly serviceModel: Model<ServiceDocument>,
+    @InjectModel(Salon.name) private readonly salonModel: Model<SalonDocument>,
+    @InjectModel(StaffProfile.name) private readonly profileModel: Model<StaffProfileDocument>,
   ) {}
 
-  async forDate(scope: SalonScope, date: string): Promise<OverviewResult> {
+  async ownerHq(date = todayIso()): Promise<OwnerHqResult> {
+    const tenantId = getTenantContext().tenantId;
+    const [overview, salon, staff, profiles, todayAppts] = await Promise.all([
+      this.forDate(date),
+      // `salons` est UNSCOPED — lookup par _id, pas un filtre `salonId`.
+      this.salonModel.findById(tenantId).lean(),
+      this.staffModel.find({ isActive: true }).lean(),
+      this.profileModel.find({}).select('userId level').lean(),
+      this.apptModel.find({ start: { $gte: new Date(`${date}T00:00:00.000Z`), $lt: new Date(`${addDaysIso(date, 1)}T00:00:00.000Z`) } }).lean(),
+    ]);
+    if (!salon) {
+      return {
+        id: tenantId,
+        name: 'Salon',
+        address: '',
+        hoursToday: null,
+        isOpen: false,
+        todayRevenue: overview.kpis.revenue,
+        revenueChangePct: overview.kpis.revenueChangePct,
+        bookingCount: overview.kpis.appointments.booked + overview.kpis.appointments.done + overview.kpis.appointments.noShow,
+        barbersOn: overview.kpis.barbersOn,
+        barbersTotal: overview.kpis.barbersTotal,
+        occupancyPct: overview.kpis.occupancyPct,
+        team: [],
+      };
+    }
+
+    const todayHours = salon.businessHours?.find((h) => h.day === weekdayOf(date));
+    const countByStylist = new Map<string, number>();
+    for (const a of todayAppts) {
+      if (a.status === 'cancelled' || a.status === 'noshow') continue;
+      const id = a.stylistId.toString();
+      countByStylist.set(id, (countByStylist.get(id) ?? 0) + 1);
+    }
+    const profileByStaffId = new Map(profiles.map((profile) => [profile.userId.toString(), profile]));
+
+    return {
+      id: salon._id.toString(),
+      name: salon.name,
+      address: salon.address ?? '',
+      hoursToday: todayHours?.isOpen ? `${todayHours.start}-${todayHours.end}` : null,
+      isOpen: computeSalonIsOpen(salon) ?? false,
+      todayRevenue: overview.kpis.revenue,
+      revenueChangePct: overview.kpis.revenueChangePct,
+      bookingCount: overview.kpis.appointments.booked + overview.kpis.appointments.done + overview.kpis.appointments.noShow,
+      barbersOn: overview.kpis.barbersOn,
+      barbersTotal: overview.kpis.barbersTotal,
+      occupancyPct: overview.kpis.occupancyPct,
+      team: staff.map((s) => {
+        const todayCount = countByStylist.get(s._id.toString()) ?? 0;
+        return {
+          id: s._id.toString(),
+          name: s.name,
+          initials: initials(s.name),
+          isPro: ['master', 'senior'].includes(profileByStaffId.get(s._id.toString())?.level ?? ''),
+          status: todayCount > 0 ? 'active' : 'off',
+          todayCount,
+        };
+      }),
+    };
+  }
+
+  async forDate(date: string): Promise<OverviewResult> {
     const dayStart = new Date(`${date}T00:00:00.000Z`);
     const dayEnd = new Date(`${date}T23:59:59.999Z`);
     const weekday = dayStart.getUTCDay();
 
     const appts = await this.apptModel.find({
-      salonId: scope.salonId,
       start: { $gte: dayStart, $lte: dayEnd },
     });
 
@@ -92,11 +177,11 @@ export class OverviewService {
       .reduce((acc, a) => acc + (a.end.getTime() - a.start.getTime()) / 60000, 0);
     // Chair-occupying staff = stylist ∪ colorist (booking.service.ts's convention — colorists
     // are bookable staff too, never exclude them from a "staff on chair" style count).
-    const stylists = await this.staffModel.find({ salonId: scope.salonId, role: { $in: ['stylist', 'colorist'] }, isActive: true });
+    const stylists = await this.staffModel.find({ role: { $in: ['stylist', 'colorist'] }, isActive: true });
     let availMin = 0;
     let barbersOn = 0;
     for (const st of stylists) {
-      const sched = await this.scheduleModel.findOne({ salonId: scope.salonId, stylistId: st._id });
+      const sched = await this.scheduleModel.findOne({ stylistId: st._id });
       if (!sched) continue;
       const win = effectiveWindow(sched.weekly, sched.overrides, date);
       if (!win) continue;
@@ -107,29 +192,28 @@ export class OverviewService {
     const occupancyPct = availMin > 0 ? Math.round((busyMin / availMin) * 100) : 0;
 
     // Revenu + tips.
-    const sales = await this.saleModel.find({ salonId: scope.salonId, date: { $gte: dayStart, $lte: dayEnd } });
+    const sales = await this.saleModel.find({ date: { $gte: dayStart, $lte: dayEnd } });
     const revenue = sales.reduce((a, s) => a + s.total, 0);
-    const payments = await this.paymentModel.find({ salonId: scope.salonId, date: { $gte: dayStart, $lte: dayEnd }, refunded: false });
+    const payments = await this.paymentModel.find({ date: { $gte: dayStart, $lte: dayEnd }, refunded: false });
     const tips = payments.reduce((a, p) => a + p.tip, 0);
 
     // Revenue vs. the prior day, for the HQ "▲X%" chip.
     const prevDayStart = new Date(dayStart.getTime() - 24 * 60 * 60 * 1000);
     const prevDayEnd = new Date(dayEnd.getTime() - 24 * 60 * 60 * 1000);
-    const prevSales = await this.saleModel.find({ salonId: scope.salonId, date: { $gte: prevDayStart, $lte: prevDayEnd } });
+    const prevSales = await this.saleModel.find({ date: { $gte: prevDayStart, $lte: prevDayEnd } });
     const prevRevenue = prevSales.reduce((a, s) => a + s.total, 0);
     const revenueChangePct = prevRevenue === 0 ? (revenue > 0 ? 100 : 0) : Math.round(((revenue - prevRevenue) / prevRevenue) * 100);
 
     // Alertes.
     const lowStockDocs = await this.productModel
-      .find({ salonId: scope.salonId, active: true, $expr: { $lte: ['$stock', '$lowStockAt'] } })
+      .find({ active: true, $expr: { $lte: ['$stock', '$lowStockAt'] } })
       .sort({ stock: 1 })
       .limit(10);
     const lowStock = lowStockDocs.map((p) => ({ productId: p._id.toString(), name: p.name, stock: p.stock, lowStockAt: p.lowStockAt }));
     const pendingOrders = await this.orderModel.countDocuments({
-      salonId: scope.salonId,
       status: { $in: ['pending', 'confirmed', 'ready'] },
     });
-    const leaveRequests = await this.leaveModel.countDocuments({ salonId: scope.salonId, status: 'pending' });
+    const leaveRequests = await this.leaveModel.countDocuments({ status: 'pending' });
 
     // Top stylists (revenu via Sale.stylistId + bookings du jour).
     const nameOf = new Map(stylists.map((s) => [s._id.toString(), s.name]));

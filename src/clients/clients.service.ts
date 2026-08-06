@@ -3,9 +3,9 @@ import { InjectModel } from '@nestjs/mongoose';
 import { FilterQuery, Model, Types } from 'mongoose';
 import { Client, ClientDocument, PreferredChannel } from './schemas/client.schema';
 import { CreateClientDto, UpdateClientDto } from './dto/client.dto';
-import { SalonScope } from '../common/scope/salon-scope';
 import { Appointment, AppointmentDocument } from '../booking/schemas/appointment.schema';
 import { ClientProfileService } from '../identity/client-profile.service';
+import { getTenantContext } from '../common/tenant/tenant-context';
 
 export interface ClientStats {
   visitCount: number;
@@ -131,8 +131,8 @@ export class ClientsService {
   }
 
   /** Liste scopée, recherche optionnelle `q` sur name/phone/email. */
-  async findAll(scope: SalonScope, q?: string): Promise<ClientListItem[]> {
-    const filter: FilterQuery<ClientDocument> = { salonId: scope.salonId };
+  async findAll(q?: string): Promise<ClientListItem[]> {
+    const filter: FilterQuery<ClientDocument> = {};
     if (q && q.trim()) {
       const rx = new RegExp(this.escapeRegex(q.trim()), 'i');
       filter.$or = [{ name: rx }, { phone: rx }, { email: rx }];
@@ -142,8 +142,8 @@ export class ClientsService {
     return clients.map((c) => this.toListItem(c, stats.get(c._id.toString())));
   }
 
-  async findOne(scope: SalonScope, id: string): Promise<ClientDetail> {
-    const doc = await this.model.findOne({ _id: id, salonId: scope.salonId }).exec();
+  async findOne(id: string): Promise<ClientDetail> {
+    const doc = await this.model.findOne({ _id: id }).exec();
     if (!doc) throw new NotFoundException('Client not found.');
 
     const stats = await this.statsByClientId([doc._id as Types.ObjectId]);
@@ -163,8 +163,8 @@ export class ClientsService {
   }
 
   /** Raw doc read used internally by write paths (create/update) — no stats needed. */
-  private async findOneRaw(scope: SalonScope, id: string): Promise<ClientDocument> {
-    const doc = await this.model.findOne({ _id: id, salonId: scope.salonId }).exec();
+  private async findOneRaw(id: string): Promise<ClientDocument> {
+    const doc = await this.model.findOne({ _id: id }).exec();
     if (!doc) throw new NotFoundException('Client not found.');
     return doc;
   }
@@ -173,9 +173,10 @@ export class ClientsService {
    * Création avec merge-on-phone (Décision #10) : si un Client existe déjà avec le même
    * phone dans ce salon, on l'enrichit (sans écraser par du vide) au lieu de dupliquer.
    */
-  async create(scope: SalonScope, dto: CreateClientDto): Promise<ClientDocument> {
+  async create(dto: CreateClientDto): Promise<ClientDocument> {
+    const salonId = getTenantContext().tenantId;
     const existing = await this.model
-      .findOne({ salonId: scope.salonId, phone: dto.phone })
+      .findOne({ phone: dto.phone })
       .exec();
 
     if (existing) {
@@ -186,7 +187,7 @@ export class ClientsService {
       if (dto.notes !== undefined) existing.notes = dto.notes;
       await existing.save();
       if (!existing.profileId) {
-        await this.clientProfiles.attachProfile(scope.salonId, (existing._id as Types.ObjectId).toString(), existing.phone, {
+        await this.clientProfiles.attachProfile(salonId, (existing._id as Types.ObjectId).toString(), existing.phone, {
           name: existing.name,
           email: existing.email,
         });
@@ -195,7 +196,6 @@ export class ClientsService {
     }
 
     const created = await this.model.create({
-      salonId: scope.salonId,
       name: dto.name,
       phone: dto.phone,
       email: dto.email?.toLowerCase() ?? '',
@@ -205,15 +205,15 @@ export class ClientsService {
       registered: false,
       history: [],
     });
-    await this.clientProfiles.attachProfile(scope.salonId, (created._id as Types.ObjectId).toString(), created.phone, {
+    await this.clientProfiles.attachProfile(salonId, (created._id as Types.ObjectId).toString(), created.phone, {
       name: created.name,
       email: created.email,
     });
     return created;
   }
 
-  async update(scope: SalonScope, id: string, dto: UpdateClientDto): Promise<ClientDocument> {
-    const doc = await this.findOneRaw(scope, id);
+  async update(id: string, dto: UpdateClientDto): Promise<ClientDocument> {
+    const doc = await this.findOneRaw(id);
     if (dto.name !== undefined) doc.name = dto.name;
     if (dto.phone !== undefined) doc.phone = dto.phone;
     if (dto.email !== undefined) doc.email = dto.email.toLowerCase();

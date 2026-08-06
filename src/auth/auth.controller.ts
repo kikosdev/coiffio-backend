@@ -19,13 +19,18 @@ import {
   PasswordResetConfirmDto,
   PasswordResetRequestDto,
   RegisterDto,
+  SwitchTenantDto,
+  UpdateExpoPushTokenDto,
   UpdateMeDto,
 } from './dto/auth.dto';
+import { ListedMembership } from '../identity/membership.service';
 import { JwtGuard } from '../common/guards/jwt.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser, AuthUser } from '../common/decorators/current-user.decorator';
-import { getSalonScope } from '../common/scope/salon-scope';
+import { currentScope } from '../common/scope/salon-scope';
+import { extractTenantSlugFromHost } from '../common/tenant/subdomain.util';
+import { Destructive } from '../common/decorators/destructive.decorator';
 
 const COOKIE_NAME = 'access_token';
 
@@ -72,9 +77,14 @@ export class AuthController {
   @Post('register')
   async register(
     @Body() dto: RegisterDto,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<{ data: { token: string; user: PublicUser }; message: string }> {
-    const result = await this.auth.register(dto);
+    // Sprint 2 v2 Prompt 4 : sous-domaine du Host en priorité (no-op sûr en dev/localhost,
+    // voir `extractTenantSlugFromHost`), sinon le slug explicite du body — jamais de
+    // fallback silencieux ensuite, `resolveSalonId()` 404 si aucun des deux ne résout.
+    const salonSlug = extractTenantSlugFromHost(req.hostname) ?? dto.salonSlug;
+    const result = await this.auth.register(dto, salonSlug);
     this.setAuthCookie(res, result.token);
     return { data: result, message: 'Account created successfully.' };
   }
@@ -84,9 +94,11 @@ export class AuthController {
   @Post('register/client')
   async registerClient(
     @Body() dto: RegisterDto,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<{ data: { token: string; user: PublicUser }; message: string }> {
-    const result = await this.auth.register(dto);
+    const salonSlug = extractTenantSlugFromHost(req.hostname) ?? dto.salonSlug;
+    const result = await this.auth.register(dto, salonSlug);
     this.setAuthCookie(res, result.token);
     return { data: result, message: 'Account created successfully.' };
   }
@@ -98,10 +110,9 @@ export class AuthController {
   @UseGuards(JwtGuard, RolesGuard)
   @Roles('owner')
   async createStaff(
-    @Req() req: Request,
     @Body() dto: CreateStaffAuthDto,
   ): Promise<{ data: { user: PublicUser }; message: string }> {
-    const { salonId } = getSalonScope(req);
+    const { salonId } = currentScope();
     const data = await this.auth.createStaff(salonId, dto);
     return { data, message: 'Staff account created.' };
   }
@@ -154,12 +165,64 @@ export class AuthController {
   @ApiBearerAuth()
   @Patch('me/password')
   @UseGuards(JwtGuard)
+  @Destructive()
   async changePassword(
     @CurrentUser() user: AuthUser,
     @Body() dto: ChangePasswordDto,
   ): Promise<{ data: { ok: boolean }; message: string }> {
     await this.auth.changePassword(user, dto);
     return { data: { ok: true }, message: 'Mot de passe mis à jour.' };
+  }
+
+  @ApiOperation({ summary: "Deactivate the currently authenticated user's account" })
+  @ApiResponse({ status: 200, description: 'Account deactivated.' })
+  @ApiBearerAuth()
+  @Patch('me/deactivate')
+  @UseGuards(JwtGuard)
+  @Destructive()
+  async deactivateMe(
+    @CurrentUser() user: AuthUser,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<{ data: { ok: boolean }; message: string }> {
+    await this.auth.deactivateMe(user);
+    res.clearCookie(COOKIE_NAME, { path: '/' });
+    return { data: { ok: true }, message: 'Account deactivated.' };
+  }
+
+  @ApiOperation({ summary: 'List the tenants the current user has active access to (for the tenant switcher)' })
+  @ApiResponse({ status: 200, description: 'Active memberships.' })
+  @ApiBearerAuth()
+  @Get('me/memberships')
+  @UseGuards(JwtGuard)
+  async listMemberships(@CurrentUser() user: AuthUser): Promise<{ data: ListedMembership[]; message: string }> {
+    const data = await this.auth.listMemberships(user);
+    return { data, message: 'OK' };
+  }
+
+  @ApiOperation({ summary: 'Switch the active tenant (validates membership, returns a refreshed token)' })
+  @ApiResponse({ status: 201, description: 'Tenant switched.' })
+  @ApiBearerAuth()
+  @Post('me/switch-tenant')
+  @UseGuards(JwtGuard)
+  async switchTenant(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: SwitchTenantDto,
+  ): Promise<{ data: { token: string; tenantId: string; role: string; locationIds: string[]; defaultLocationId?: string }; message: string }> {
+    const data = await this.auth.switchTenant(user, dto.tenantId);
+    return { data, message: 'Tenant switched.' };
+  }
+
+  @ApiOperation({ summary: "Store or clear the current user's Expo push token" })
+  @ApiResponse({ status: 200, description: 'Push token updated.' })
+  @ApiBearerAuth()
+  @Patch('me/push-token')
+  @UseGuards(JwtGuard)
+  async updatePushToken(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: UpdateExpoPushTokenDto,
+  ): Promise<{ data: { ok: boolean }; message: string }> {
+    await this.auth.updateExpoPushToken(user, dto.expoPushToken);
+    return { data: { ok: true }, message: 'Push token updated.' };
   }
 
   @ApiOperation({ summary: 'Sign out and clear the access_token cookie' })

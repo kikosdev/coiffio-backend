@@ -1,0 +1,37 @@
+name: CI
+
+# Prompt 9 (SKILL_saas_sprint1_tenant_isolation_v2) — filet anti-régression permanent.
+# BLOQUE le merge (branch protection côté GitHub) si lint, build ou test échoue. Aucun
+# service MongoDB à provisionner : chaque suite boot son propre mongodb-memory-server
+# (replica set, transactions réelles) en mémoire, isolé, jetable.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Test (Jest — tenant isolation, auth-by-role, provisioning, entitlements, discovery, client-profile, storefront-guest, scoping-coverage)
+        run: npm test -- --ci --runInBand

@@ -7,18 +7,16 @@ import {
   Param,
   Post,
   Put,
-  Req,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { Request } from 'express';
 import { ScheduleService } from './schedule.service';
 import { AddOverrideDto, SetWeeklyDto } from './dto/team.dto';
 import { JwtGuard } from '../common/guards/jwt.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
-import { getSalonScope } from '../common/scope/salon-scope';
 import { CurrentUser, AuthUser } from '../common/decorators/current-user.decorator';
+import { Destructive } from '../common/decorators/destructive.decorator';
 
 /**
  * Schedule (Sprint 3) — la source de vérité de disponibilité (lue par le booking engine).
@@ -43,17 +41,17 @@ export class ScheduleController {
   @ApiOperation({ summary: "Get the salon's opening hours" })
   @ApiResponse({ status: 200, description: 'OK' })
   @Get('salon-hours')
-  async getSalonHours(@Req() req: Request) {
-    const data = await this.schedule.getSalonHours(getSalonScope(req));
+  async getSalonHours() {
+    const data = await this.schedule.getSalonHours();
     return { data, message: 'OK' };
   }
 
   @ApiOperation({ summary: "Get a stylist's schedule (own schedule only for stylists)" })
   @ApiResponse({ status: 200, description: 'OK' })
   @Get(':stylistId')
-  async get(@Req() req: Request, @CurrentUser() user: AuthUser, @Param('stylistId') stylistId: string) {
+  async get(@CurrentUser() user: AuthUser, @Param('stylistId') stylistId: string) {
     this.assertCanRead(user, stylistId);
-    const data = await this.schedule.getSchedule(getSalonScope(req), stylistId);
+    const data = await this.schedule.getSchedule(stylistId);
     return { data, message: 'OK' };
   }
 
@@ -61,8 +59,8 @@ export class ScheduleController {
   @ApiResponse({ status: 200, description: 'Weekly rota saved.' })
   @Put(':stylistId')
   @Roles('owner', 'manager')
-  async setWeekly(@Req() req: Request, @Param('stylistId') stylistId: string, @Body() dto: SetWeeklyDto) {
-    const data = await this.schedule.setWeekly(getSalonScope(req), stylistId, dto);
+  async setWeekly(@Param('stylistId') stylistId: string, @Body() dto: SetWeeklyDto) {
+    const data = await this.schedule.setWeekly(stylistId, dto);
     return { data, message: 'Weekly rota saved.' };
   }
 
@@ -70,8 +68,8 @@ export class ScheduleController {
   @ApiResponse({ status: 201, description: 'Override added.' })
   @Post(':stylistId/override')
   @Roles('owner', 'manager')
-  async addOverride(@Req() req: Request, @Param('stylistId') stylistId: string, @Body() dto: AddOverrideDto) {
-    const data = await this.schedule.addOverride(getSalonScope(req), stylistId, dto);
+  async addOverride(@Param('stylistId') stylistId: string, @Body() dto: AddOverrideDto) {
+    const data = await this.schedule.addOverride(stylistId, dto);
     return { data, message: 'Override added.' };
   }
 
@@ -79,12 +77,12 @@ export class ScheduleController {
   @ApiResponse({ status: 200, description: 'Override removed.' })
   @Delete(':stylistId/override/:date')
   @Roles('owner', 'manager')
+  @Destructive()
   async removeOverride(
-    @Req() req: Request,
     @Param('stylistId') stylistId: string,
     @Param('date') date: string,
   ) {
-    const data = await this.schedule.removeOverride(getSalonScope(req), stylistId, date);
+    const data = await this.schedule.removeOverride(stylistId, date);
     return { data, message: 'Override removed.' };
   }
 }

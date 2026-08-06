@@ -1,7 +1,7 @@
 import { ForbiddenException, InternalServerErrorException, Logger } from '@nestjs/common';
 import { Aggregate, Document, Model, PipelineStage, Query, Schema, Types } from 'mongoose';
-import { GLOBAL, LOCATION_SCOPED, UNSCOPED } from './scoping-registry';
-import { getTenantContext, tenantStorage } from './tenant-context';
+import { GLOBAL, GUEST_READABLE, LOCATION_SCOPED, PUBLIC_DISCOVERY, PUBLIC_DISCOVERY_FIELDS, UNSCOPED } from './scoping-registry';
+import { getTenantContext, isDiscoveryContext, isGuestContext, tenantStorage } from './tenant-context';
 
 const logger = new Logger('TenantScopePlugin');
 
@@ -17,6 +17,46 @@ const pluginAppliedSchemas = new WeakSet<Schema>();
 
 function isScopeExempt(collectionName: string): boolean {
   return (UNSCOPED as readonly string[]).includes(collectionName) || (GLOBAL as readonly string[]).includes(collectionName);
+}
+
+/**
+ * Applique la whitelist de champs + le blocage de collection en mode découverte. Appelée
+ * depuis les trois chemins (query/aggregate) — jamais un simple laisser-passer, contraint
+ * par le point critique hérité du Prompt 3 (spec Prompt 5, §critique).
+ */
+function assertDiscoveryCollectionAllowed(collectionName: string): void {
+  if (!(PUBLIC_DISCOVERY as readonly string[]).includes(collectionName)) {
+    throw new ForbiddenException(`Discovery mode cannot access non-whitelisted collection: ${collectionName}`);
+  }
+}
+
+/**
+ * Durcissement post-Sprint-1-v2 (trou trouvé au Prompt 6, fermé avant Sprint 2) : même
+ * principe que `assertDiscoveryCollectionAllowed`, mais pour `runAsGuest`. Contrairement à la
+ * découverte, un contexte guest reste mono-tenant (`ctx.tenantId` réel) — cette fonction ne
+ * remplace donc PAS l'injection normale salonId/locationId qui suit, elle ajoute juste un
+ * filtre de COLLECTION en amont : une lecture guest hors `GUEST_READABLE` throw avant même
+ * d'atteindre cette injection.
+ */
+function assertGuestCollectionAllowed(collectionName: string): void {
+  if (!(GUEST_READABLE as readonly string[]).includes(collectionName)) {
+    throw new ForbiddenException(`Guest mode cannot read non-whitelisted collection: ${collectionName}`);
+  }
+}
+
+/**
+ * `QUERY_HOOKS` (plus bas) fait passer `updateOne`/`updateMany`/`deleteOne`/`deleteMany`/
+ * `findOneAndUpdate`/`findOneAndDelete` par le MÊME hook Mongoose que les vraies lectures
+ * (`find`/`findOne`/`count`/`countDocuments`) — un artefact de l'architecture du plugin, pas
+ * une lecture au sens du spec ("Toute LECTURE guest... → THROW"). La whitelist guest ne doit
+ * restreindre QUE les opérations de lecture réelles ; les écritures via ces hooks (ex.
+ * `NotificationsService.dispatchOnce`'s `updateOne` upsert) restent volontairement
+ * non-restreintes, comme `.create()`/`.save()` (`applyWriteScope`, jamais touché ici).
+ */
+const GUEST_RESTRICTED_READ_OPS = new Set(['find', 'findOne', 'count', 'countDocuments']);
+
+function isReadOp(query: Query<unknown, unknown>): boolean {
+  return GUEST_RESTRICTED_READ_OPS.has((query as unknown as { op?: string }).op ?? '');
 }
 
 function assertPlainString(value: unknown, label: string): void {
@@ -37,18 +77,53 @@ function collectionNameOfDoc(doc: Document): string | undefined {
   return (doc as unknown as { collection?: { name?: string } }).collection?.name;
 }
 
+/**
+ * Durci post-Sprint-1-v2 (trou trouvé au Prompt 6, fermé avant Sprint 2 — voir docstring
+ * complète sur `runAsGuest` dans tenant-context.ts) : un contexte guest (`isGuestContext`)
+ * passe désormais par `assertGuestCollectionAllowed` avant les vérifications tenant/location
+ * normales — une lecture hors `GUEST_READABLE` (`clients`/`payments`/... compris) throw ici,
+ * structurellement, plutôt que de dépendre de l'absence de route contrôleur publique
+ * l'exposant.
+ */
 function applyQueryScope(query: Query<unknown, unknown>): void {
   const collectionName = collectionNameOfQuery(query);
-  if (!collectionName || isScopeExempt(collectionName)) return;
+  if (!collectionName) return;
 
   const store = tenantStorage.getStore();
+
+  // Vérifié AVANT isScopeExempt à dessein : `salons` est UNSCOPED (donc normalement
+  // exempté) mais reste la collection la plus sensible (email, phone, taxRate...) —
+  // en mode découverte, elle doit quand même passer par la whitelist de champs, pas
+  // être laissée passer sous prétexte qu'elle échappe au scope tenant habituel.
+  if (store && isDiscoveryContext(store)) {
+    assertDiscoveryCollectionAllowed(collectionName);
+    const fields = PUBLIC_DISCOVERY_FIELDS[collectionName];
+    if (fields) query.select(fields.join(' '));
+    // Filtre de ligne pour staffs : jamais un profil non public, même si le
+    // DiscoveryService oublie de le filtrer lui-même — backstop, pas la seule barrière.
+    if (collectionName === 'staffs') {
+      const filter = query.getFilter() as Record<string, unknown>;
+      query.setQuery({ ...filter, 'publicProfile.visible': true });
+    }
+    return; // volontairement cross-tenant : aucune injection salonId/locationId ici
+  }
+
+  if (isScopeExempt(collectionName)) return;
+
+  // Vérifié APRÈS isScopeExempt, contrairement à la découverte : `users`/`clientprofiles`
+  // (GLOBAL) restent lisibles sous un contexte guest exactement comme partout ailleurs
+  // (ex. `NotificationsService.resolvePushRecipients`, appelé en fire-and-forget depuis
+  // une notification déclenchée par un booking public) — seules les collections
+  // TENANT/LOCATION_SCOPED, qui exigent une résolution de contexte, passent par la
+  // whitelist `GUEST_READABLE`.
+  if (store && isGuestContext(store) && isReadOp(query)) {
+    assertGuestCollectionAllowed(collectionName);
+    // Pas de `return` ici, contrairement à la découverte : un contexte guest reste
+    // mono-tenant — l'injection normale salonId/locationId ci-dessous doit continuer.
+  }
+
   if (store?.bypass) {
     logger.warn(`Tenant scope bypass on query (${collectionName}): ${store.bypassReason}`);
-    return;
-  }
-  if (store?.discovery) {
-    // Prompt 5 (DiscoveryService) pas encore construit — la projection restreinte aux
-    // champs whitelistés est de sa responsabilité, pas de ce plugin. Laisse passer.
     return;
   }
 
@@ -85,6 +160,11 @@ function applyWriteScope(target: Record<string, unknown>, collectionName: string
     logger.warn(`Tenant scope bypass on write (${collectionName}): ${store.bypassReason}`);
     return;
   }
+  if (store && isDiscoveryContext(store)) {
+    // La découverte est une vitrine en lecture seule — aucune écriture ne doit jamais
+    // s'y produire, même par accident de code. Backstop, pas la seule barrière.
+    throw new ForbiddenException('Discovery mode is read-only — writes are never permitted.');
+  }
 
   const ctx = getTenantContext();
   assertPlainString(ctx.tenantId, 'tenantId');
@@ -110,9 +190,31 @@ function applyWriteScope(target: Record<string, unknown>, collectionName: string
 function applyAggregateScope(agg: Aggregate<unknown>): void {
   const model = typeof agg.model === 'function' ? agg.model() : undefined;
   const collectionName = model?.collection?.name;
-  if (!collectionName || isScopeExempt(collectionName)) return;
+  if (!collectionName) return;
 
   const store = tenantStorage.getStore();
+
+  if (store && isDiscoveryContext(store)) {
+    // Contrairement à find() (`.select()` universellement sûr), un pipeline d'agrégation
+    // peut légitimement RESHAPER les documents (ex. $group pour /discovery/regions, qui
+    // ne renvoie que { region, count } — aucune fuite possible sur ces deux champs-là).
+    // Forcer un $project figé sur les noms de champs de la whitelist casserait un tel
+    // $group. Le garde-fou ici reste réel mais plus étroit : collection whitelistée
+    // uniquement, pas de projection auto-devinée. `nearby()` (find-like, sans $group)
+    // ajoute lui-même son propre $project conforme à la whitelist, comme find().
+    assertDiscoveryCollectionAllowed(collectionName);
+    return; // volontairement cross-tenant : aucun $match salonId/locationId ici
+  }
+
+  if (isScopeExempt(collectionName)) return;
+
+  // Même raison que dans applyQueryScope : vérifié APRÈS isScopeExempt pour ne pas
+  // restreindre les collections GLOBAL (users/clientprofiles), déjà exemptées partout.
+  if (store && isGuestContext(store)) {
+    assertGuestCollectionAllowed(collectionName);
+    // Pas de `return` ici : mono-tenant, l'injection $match salonId/locationId continue.
+  }
+
   if (store?.bypass) {
     logger.warn(`Tenant scope bypass on aggregate (${collectionName}): ${store.bypassReason}`);
     return;
@@ -188,7 +290,18 @@ export function tenantScopePlugin(schema: Schema): void {
   schema.pre('validate', function (this: Document, next) {
     try {
       const collectionName = collectionNameOfDoc(this);
-      if (!collectionName || isScopeExempt(collectionName)) {
+      if (!collectionName) {
+        next();
+        return;
+      }
+      const store = tenantStorage.getStore();
+      // Vérifié AVANT isScopeExempt : une écriture en mode découverte doit throw même
+      // sur une collection normalement exemptée (ex. `salons`) — la découverte est une
+      // vitrine en lecture seule, sans exception.
+      if (store && isDiscoveryContext(store)) {
+        throw new ForbiddenException('Discovery mode is read-only — writes are never permitted.');
+      }
+      if (isScopeExempt(collectionName)) {
         next();
         return;
       }
@@ -202,8 +315,14 @@ export function tenantScopePlugin(schema: Schema): void {
   schema.pre('insertMany', function (this: Model<unknown>, next, docs: unknown) {
     try {
       const collectionName = this.collection?.name;
-      if (collectionName && !isScopeExempt(collectionName)) {
-        for (const doc of docs as Record<string, unknown>[]) applyWriteScope(doc, collectionName);
+      if (collectionName) {
+        const store = tenantStorage.getStore();
+        if (store && isDiscoveryContext(store)) {
+          throw new ForbiddenException('Discovery mode is read-only — writes are never permitted.');
+        }
+        if (!isScopeExempt(collectionName)) {
+          for (const doc of docs as Record<string, unknown>[]) applyWriteScope(doc, collectionName);
+        }
       }
       next();
     } catch (err) {

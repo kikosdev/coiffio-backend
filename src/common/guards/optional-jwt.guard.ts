@@ -1,29 +1,14 @@
-import { CanActivate, ExecutionContext, Injectable } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
-import { Request } from 'express';
-import { AuthUser } from '../decorators/current-user.decorator';
-import { extractToken } from './jwt.guard';
+import { CanActivate, Injectable } from '@nestjs/common';
 
 /**
- * Convention #5 — laisse toujours passer la requête, mais attache `req.user`
- * si un token valide est présent (routes publiques qui se comportent différemment
- * quand authentifiées, ex. panier storefront).
+ * Sprint 2 v2 Prompt 2 : `req.user` est désormais résolu-ou-absent par
+ * `TenantContextMiddleware` (voir `JwtGuard` pour le détail) — ce guard n'a plus rien à
+ * décoder lui-même, il laisse simplement toujours passer (routes publiques qui se
+ * comportent différemment si authentifiées, ex. panier storefront).
  */
 @Injectable()
 export class OptionalJwtGuard implements CanActivate {
-  constructor(private readonly jwt: JwtService) {}
-
-  async canActivate(context: ExecutionContext): Promise<boolean> {
-    const req = context.switchToHttp().getRequest<Request & { user?: AuthUser }>();
-    const token = extractToken(req);
-    if (token) {
-      try {
-        req.user = await this.jwt.verifyAsync<AuthUser>(token);
-      } catch {
-        // token invalide → on reste anonyme, sans rejeter
-        req.user = undefined;
-      }
-    }
+  canActivate(): boolean {
     return true;
   }
 }

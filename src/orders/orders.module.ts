@@ -10,11 +10,13 @@ import { OrdersService } from './orders.service';
 import { OrdersController } from './orders.controller';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { IdentityModule } from '../identity/identity.module';
+import { TenantModule } from '../common/tenant/tenant.module';
 
 @Module({
   imports: [
     NotificationsModule,
     IdentityModule,
+    TenantModule,
     MongooseModule.forFeature([
       { name: Cart.name, schema: CartSchema },
       { name: Order.name, schema: OrderSchema },

@@ -1,27 +1,33 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe, Logger } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
-import { ResponseInterceptor } from './common/interceptors/response.interceptor';
-import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { NestWinstonLogger } from './common/logger/nest-logger.service';
+import { configureApp } from './bootstrap/configure-app';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, { logger: new NestWinstonLogger() });
+  // rawBody: true — expose req.rawBody (Buffer) sans changer le parsing JSON normal des
+  // autres routes. Nécessaire pour vérifier la signature HMAC du webhook
+  // POST /internal/entitlements/invalidate (Prompt 7) sur le corps EXACT reçu, pas un
+  // JSON.stringify(req.body) reconstruit qui pourrait diverger de ce que l'émetteur a signé.
+  const app = await NestFactory.create(AppModule, { logger: new NestWinstonLogger(), rawBody: true });
 
-  app.setGlobalPrefix('api');
-  app.use(cookieParser());
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+  configureApp(app);
 
-  // Convention #1 & #2 — enveloppe globale + filtre d'exception
-  app.useGlobalInterceptors(new ResponseInterceptor());
-  app.useGlobalFilters(new AllExceptionsFilter());
-
-  // CORS — exact origins only, never '*' (required for cookies + desktop Bearer)
-  const allowedOrigins = [process.env.FRONTEND_ORIGIN, process.env.DESKTOP_ORIGIN].filter((o): o is string => !!o);
-  app.enableCors({ origin: allowedOrigins, credentials: true });
+  // CORS — exact configured origins, plus origin-less native clients (React Native).
+  const allowedOrigins = [
+    process.env.FRONTEND_ORIGIN,
+    process.env.DESKTOP_ORIGIN,
+    ...(process.env.MOBILE_ORIGINS?.split(',').map((o) => o.trim()).filter(Boolean) ?? []),
+  ].filter((o): o is string => !!o);
+  app.enableCors({
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) callback(null, true);
+      else callback(new Error('Not allowed by CORS'));
+    },
+    credentials: true,
+  });
 
   const swaggerConfig = new DocumentBuilder()
     .setTitle('Coiffio API')

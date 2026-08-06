@@ -4,6 +4,7 @@ import { Product, ProductSchema } from './schemas/product.schema';
 import { StockMove, StockMoveSchema } from './schemas/stock-move.schema';
 import { StockService } from './stock.service';
 import { StockController } from './stock.controller';
+import { TenantModule } from '../common/tenant/tenant.module';
 
 @Module({
   imports: [
@@ -11,6 +12,7 @@ import { StockController } from './stock.controller';
       { name: Product.name, schema: ProductSchema },
       { name: StockMove.name, schema: StockMoveSchema },
     ]),
+    TenantModule,
   ],
   controllers: [StockController],
   providers: [StockService],

@@ -33,6 +33,11 @@ export class AvailabilityQueryDto {
   @IsOptional()
   @IsMongoId()
   stylistId?: string; // restreindre à un stylist précis
+
+  // Absent → la location primaire du tenant (Prompt 6, filtrage locationId ∈ staff.locationIds).
+  @IsOptional()
+  @IsMongoId()
+  locationId?: string;
 }
 
 /** GET /availability/timeline?serviceIds=a,b&startDate=YYYY-MM-DD&days=7 — vue multi-jours (#1 live, par jour). */
@@ -63,6 +68,11 @@ export class AvailabilityTimelineQueryDto {
   @Min(1)
   @Max(31)
   days?: number;
+
+  // Absent → la location primaire du tenant (Prompt 6, filtrage locationId ∈ staff.locationIds).
+  @IsOptional()
+  @IsMongoId()
+  locationId?: string;
 }
 
 export class CreateAppointmentDto {
@@ -79,7 +89,7 @@ export class CreateAppointmentDto {
   @IsMongoId()
   clientId?: string;
 
-  // …ou résolution merge-on-phone (#10) : nom + phone + email (email mandatoire #11).
+  // …ou résolution merge-on-phone (#10) : nom + phone. Email is optional.
   @IsOptional()
   @IsString()
   clientName?: string;

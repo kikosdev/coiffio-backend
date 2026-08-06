@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsNumber, IsOptional, IsString, MinLength } from 'class-validator';
+import { IsIn, IsNumber, IsOptional, IsString, MinLength } from 'class-validator';
 
 export class SearchServicesQueryDto {
   @IsString()
@@ -13,8 +13,36 @@ export class OfferingsQueryDto {
   category?: string;
 
   @IsOptional()
+  @IsString({ each: true })
+  categories?: string | string[];
+
+  @IsOptional()
+  @IsString({ each: true })
+  'categories[]'?: string | string[];
+
+  @IsOptional()
   @IsString()
   name?: string;
+
+  @IsOptional()
+  @IsString({ each: true })
+  names?: string | string[];
+
+  @IsOptional()
+  @IsString({ each: true })
+  'names[]'?: string | string[];
+
+  @IsOptional()
+  @IsString({ each: true })
+  serviceIds?: string | string[];
+
+  @IsOptional()
+  @IsString({ each: true })
+  'serviceIds[]'?: string | string[];
+
+  @IsOptional()
+  @IsIn(['all', 'any'])
+  match?: 'all' | 'any';
 
   @IsOptional()
   @Type(() => Number)
@@ -26,4 +54,3 @@ export class OfferingsQueryDto {
   @IsNumber()
   lng?: number;
 }
-

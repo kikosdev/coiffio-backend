@@ -33,12 +33,13 @@ MONGO_URI=<mongodb atlas connection string>
 JWT_SECRET=<secret>
 JWT_EXPIRES=7d
 PORT=3000
-DEFAULT_SALON_ID=<24-char ObjectId>
 FRONTEND_ORIGIN=http://localhost:5173
 DESKTOP_ORIGIN=http://localhost:5174
+MOBILE_ORIGINS=exp://192.168.x.x:8081,coiffio://app
+PRIVACY_POLICY_URL=https://coiffio.com/privacy
 ```
 
-**Production (Render):** `FRONTEND_ORIGIN=https://coiffio-front.vercel.app` and `DESKTOP_ORIGIN=https://coiffio-desktop.vercel.app` — these must be set with NO trailing slash or CORS will block all POST requests.
+**Production (Render):** `FRONTEND_ORIGIN=https://coiffio-front.vercel.app` and `DESKTOP_ORIGIN=https://coiffio-desktop.vercel.app` — these must be set with NO trailing slash. Native/mobile REST and Socket.io calls with no `Origin` header are allowed; custom dev-client origins can be listed in `MOBILE_ORIGINS`.
 
 ---
 
@@ -46,27 +47,27 @@ DESKTOP_ORIGIN=http://localhost:5174
 
 - **Base URL:** `http://localhost:3000/api`
 - **Auth scheme:** HttpOnly cookie (`salon_token`) for web clients; `Authorization: Bearer <token>` for mobile/desktop
-- **Single salon:** `DEFAULT_SALON_ID` env var — all scoped queries use this. The `salonId` field is always stored/queried as a **plain string**, never a BSON ObjectId.
+- **Multi-tenant:** the active tenant is resolved per-request from the JWT's `memberships[]` (via `X-Tenant-Id` when ambiguous) — see `TenantContextMiddleware`. Public/anonymous routes resolve the tenant from the `:salonSlug` URL param or subdomain instead. The `salonId` field is always stored/queried as a **plain string**, never a BSON ObjectId.
 
 ### Modules & routes
 
 | Module | Routes |
 |---|---|
-| **Auth** | `POST /auth/login` · `POST /auth/register` · `POST /auth/login-pin` (POS) · `POST /auth/logout` |
+| **Auth** | `POST /auth/login` · `POST /auth/register` · `POST /auth/login-pin` (POS) · `PATCH /auth/me/deactivate` · `PATCH /auth/me/push-token` · `POST /auth/logout` |
 | **Team** | `GET/POST /team` · `PATCH/DELETE /team/:id` · `GET /team/:id` |
 | **POS** | `GET /pos/roster` · `POST /pos/clock-in` (PosScopeGuard) |
 | **Schedule** | `GET /team/:id/schedule` · `PATCH /team/:id/schedule` · Leave endpoints |
-| **Booking** | `POST /appointments` · `GET /appointments` · `PATCH /appointments/:id` etc. |
+| **Booking** | `POST /appointments` · `GET /appointments` · `GET /appointments/mine` · `GET /staff/today` · `GET /staff/schedule/week` · `GET /client/home` · `PATCH /appointments/:id/cancel` |
 | **Services** | `GET/POST /services` · `PATCH/DELETE /services/:id` |
 | **Finance** | Expenses, payments, overview |
 | **Stock** | `GET/POST /products` · `GET /stock/moves` |
 | **Sales** | `POST /sales` · `GET /sales` |
 | **Orders** | Cart + order lifecycle |
 | **Clients** | Client CRM |
-| **Notifications** | WebSocket + notification store |
-| **Overview** | Dashboard aggregates |
+| **Notifications** | WebSocket + notification store + Expo push delivery to stored user tokens |
+| **Overview** | Dashboard aggregates · `GET /owner/hq` mobile aggregate |
 | **Settings** | Salon config, roles, business hours |
-| **Public** | Unauthenticated storefront data (landing, team, services, testimonials) |
+| **Public** | Unauthenticated storefront data (landing, team, services, testimonials) · `GET /config/public` |
 
 ### Auth flow
 
@@ -123,6 +124,10 @@ No dummy data is used. All data is real MongoDB documents.
 ## Key design decisions
 
 - **Stylist + colorist are both bookable.** The booking domain treats `role: { $in: ['stylist','colorist'] }` everywhere. `owner`/`manager` are administrative only.
+- **Check-in codes are stored.** New appointments receive a `BXXX` `checkInCode` that is unique per salon/day using `appointments(salonId,startDay,checkInCode)`.
+- **Notifications scope staff separately from users.** Realtime dispatch can target `user:{userId}`, `staff:{staffId}`, `role:{role}`, or `salon:{salonId}`; persisted notifications store `staffId` when the recipient is a staff profile.
+- **Expo push delivery is tied to stored user tokens.** Mobile clients register tokens with `/auth/me/push-token`; notification dispatch resolves user/staff/role recipients, sends to Expo, and clears tokens reported as `DeviceNotRegistered`.
+- **Owner deactivation is guarded.** `/auth/me/deactivate` blocks the last active owner in a salon so ownership cannot be orphaned.
 - **Date strings are timezone-naive.** Business-day strings (`YYYY-MM-DD`) are built and compared without timezone conversion on the backend. The frontend must use `localDateISO()` (never `toISOString()`) to avoid off-by-one-day bugs for UTC+ timezones.
 - **`salonId` single-tenant.** All data is scoped to one salon. Multi-salon support is a `// TODO` (some screens show a "Locked" teaser in the design).
 - **POS tokens never use cookies.** Desktop/kiosk reads token from `sessionStorage` (swap seam for Tauri secure store) and sends it as Bearer header.

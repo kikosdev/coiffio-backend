@@ -7,8 +7,8 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Salon, SalonDocument } from '../seed/schemas/salon.schema';
 import { SalonRole, SalonRoleDocument } from './schemas/salon-role.schema';
-import { SalonScope } from '../common/scope/salon-scope';
 import { UpdateSalonDto, CreateRoleDto, UpdateRoleDto } from './dto/settings.dto';
+import { getTenantContext } from '../common/tenant/tenant-context';
 import { PERMISSIONS, ROLE_DEFAULT_PERMISSIONS } from './permissions';
 
 const SYSTEM_ROLE_COLORS: Record<string, string> = {
@@ -29,15 +29,18 @@ export class SettingsService {
 
   // ── Salon config ─────────────────────────────────────────────────────────────
 
-  async getSalon(scope: SalonScope): Promise<SalonDocument> {
-    const salon = await this.salonModel.findById(scope.salonId);
+  async getSalon(): Promise<SalonDocument> {
+    // `salons` est UNSCOPED (le doc tenant lui-même) — pas un filtre `salonId`, un lookup
+    // par _id, donc toujours besoin du tenantId explicite ici (le plugin ne s'en charge
+    // pas pour cette collection).
+    const salon = await this.salonModel.findById(getTenantContext().tenantId);
     if (!salon) throw new NotFoundException('Salon introuvable.');
     return salon;
   }
 
-  async updateSalon(scope: SalonScope, dto: UpdateSalonDto): Promise<SalonDocument> {
+  async updateSalon(dto: UpdateSalonDto): Promise<SalonDocument> {
     const salon = await this.salonModel.findByIdAndUpdate(
-      scope.salonId,
+      getTenantContext().tenantId,
       { $set: dto },
       { new: true, runValidators: true },
     );
@@ -47,13 +50,12 @@ export class SettingsService {
 
   // ── Roles ─────────────────────────────────────────────────────────────────────
 
-  private async ensureSystemRoles(salonId: string): Promise<void> {
+  private async ensureSystemRoles(): Promise<void> {
     for (const name of SYSTEM_ROLE_NAMES) {
       await this.roleModel.updateOne(
-        { salonId, name, isSystem: true },
+        { name, isSystem: true },
         {
           $setOnInsert: {
-            salonId,
             name,
             isSystem: true,
             permissions: ROLE_DEFAULT_PERMISSIONS[name] ?? [],
@@ -65,20 +67,19 @@ export class SettingsService {
     }
   }
 
-  async getRoles(scope: SalonScope): Promise<SalonRoleDocument[]> {
-    await this.ensureSystemRoles(scope.salonId);
+  async getRoles(): Promise<SalonRoleDocument[]> {
+    await this.ensureSystemRoles();
     return this.roleModel
-      .find({ salonId: scope.salonId })
+      .find({})
       .sort({ isSystem: -1, name: 1 });
   }
 
-  async createRole(scope: SalonScope, dto: CreateRoleDto): Promise<SalonRoleDocument> {
+  async createRole(dto: CreateRoleDto): Promise<SalonRoleDocument> {
     const invalid = dto.permissions.filter((p) => !(PERMISSIONS as readonly string[]).includes(p));
     if (invalid.length) {
       throw new BadRequestException(`Permissions inconnues : ${invalid.join(', ')}`);
     }
     return this.roleModel.create({
-      salonId: scope.salonId,
       name: dto.name,
       isSystem: false,
       permissions: dto.permissions,
@@ -86,8 +87,8 @@ export class SettingsService {
     });
   }
 
-  async updateRole(scope: SalonScope, id: string, dto: UpdateRoleDto): Promise<SalonRoleDocument> {
-    const role = await this.roleModel.findOne({ _id: id, salonId: scope.salonId });
+  async updateRole(id: string, dto: UpdateRoleDto): Promise<SalonRoleDocument> {
+    const role = await this.roleModel.findOne({ _id: id });
     if (!role) throw new NotFoundException('Rôle introuvable.');
     if (role.isSystem) throw new BadRequestException('Les rôles système ne peuvent pas être modifiés.');
     if (dto.permissions) {
@@ -98,8 +99,8 @@ export class SettingsService {
     return role.save();
   }
 
-  async deleteRole(scope: SalonScope, id: string): Promise<void> {
-    const role = await this.roleModel.findOne({ _id: id, salonId: scope.salonId });
+  async deleteRole(id: string): Promise<void> {
+    const role = await this.roleModel.findOne({ _id: id });
     if (!role) throw new NotFoundException('Rôle introuvable.');
     if (role.isSystem) throw new BadRequestException('Les rôles système ne peuvent pas être supprimés.');
     await role.deleteOne();

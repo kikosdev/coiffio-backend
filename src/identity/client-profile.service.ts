@@ -236,6 +236,27 @@ export class ClientProfileService {
     });
   }
 
+  /**
+   * Tenants connus d'un client à partir de SA PROPRE fiche `Client` dans un tenant donné —
+   * résout `profileId` puis renvoie `ClientProfile.tenantIds[]` (même donnée que
+   * `getGlobalHistory`, mais le SET brut plutôt qu'un historique tout fait). Pour des
+   * appelants qui doivent faire LEURS PROPRES appels scopés par tenant (durcissement
+   * post-Sprint-1-v2 Partie 3 : `BookingService.listMine()`/`.cancel()`, BK.1/BK.2) plutôt
+   * que déléguer à `getGlobalHistory`. `tenantId` d'origine TOUJOURS inclus dans le résultat,
+   * même sans `ClientProfile` lié (téléphone jamais normalisable, ou walk-in jamais
+   * rattaché) — un client reste au moins visible chez lui.
+   */
+  async getTenantIdsForClient(tenantId: string, clientId: string): Promise<string[]> {
+    const client = await runWithTenant(systemReadContext(tenantId), () =>
+      this.clientModel.findById(clientId).select('profileId').exec(),
+    );
+    if (!client?.profileId) return [tenantId];
+    const profile = await this.profileModel.findById(client.profileId).select('tenantIds').exec();
+    const tenantIds = new Set(profile?.tenantIds ?? []);
+    tenantIds.add(tenantId);
+    return [...tenantIds];
+  }
+
   /** Résout profileId à partir d'un clientId connu dans un tenant donné, puis délègue.
    *  Pas de profileId lié (téléphone jamais normalisable, ou pas encore rattaché) →
    *  historique vide, pas une erreur. */

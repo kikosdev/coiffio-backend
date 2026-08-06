@@ -1,12 +1,10 @@
-import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { Request } from 'express';
 import { LeaveService } from './leave.service';
 import { CreateLeaveRequestDto, ListLeaveQueryDto } from './dto/team.dto';
 import { JwtGuard } from '../common/guards/jwt.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
-import { getSalonScope } from '../common/scope/salon-scope';
 import { CurrentUser, AuthUser } from '../common/decorators/current-user.decorator';
 
 /**
@@ -26,16 +24,16 @@ export class LeaveController {
   @ApiOperation({ summary: 'List leave requests for the salon (scoped to self for stylists)' })
   @ApiResponse({ status: 200, description: 'OK' })
   @Get()
-  async list(@Req() req: Request, @CurrentUser() user: AuthUser, @Query() query: ListLeaveQueryDto) {
-    const data = await this.leave.list(getSalonScope(req), user, query.status);
+  async list(@CurrentUser() user: AuthUser, @Query() query: ListLeaveQueryDto) {
+    const data = await this.leave.list(user, query.status);
     return { data, message: 'OK' };
   }
 
   @ApiOperation({ summary: 'Submit a new leave request' })
   @ApiResponse({ status: 201, description: 'Leave request submitted.' })
   @Post()
-  async create(@Req() req: Request, @CurrentUser() user: AuthUser, @Body() dto: CreateLeaveRequestDto) {
-    const data = await this.leave.create(getSalonScope(req), user, dto);
+  async create(@CurrentUser() user: AuthUser, @Body() dto: CreateLeaveRequestDto) {
+    const data = await this.leave.create(user, dto);
     return { data, message: 'Leave request submitted.' };
   }
 
@@ -43,9 +41,9 @@ export class LeaveController {
   @ApiResponse({ status: 201, description: 'Leave approved.' })
   @Post(':id/approve')
   @Roles('owner', 'manager')
-  async approve(@Req() req: Request, @CurrentUser() user: AuthUser, @Param('id') id: string) {
+  async approve(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     // En cas de conflit, le service lève un 409 { conflicts } (jamais d'auto-résolution, #6).
-    const data = await this.leave.approve(getSalonScope(req), user, id);
+    const data = await this.leave.approve(user, id);
     return { data, message: 'Leave approved.' };
   }
 
@@ -53,8 +51,8 @@ export class LeaveController {
   @ApiResponse({ status: 201, description: 'Leave request rejected.' })
   @Post(':id/reject')
   @Roles('owner', 'manager')
-  async reject(@Req() req: Request, @CurrentUser() user: AuthUser, @Param('id') id: string) {
-    const data = await this.leave.reject(getSalonScope(req), user, id);
+  async reject(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    const data = await this.leave.reject(user, id);
     return { data, message: 'Leave request rejected.' };
   }
 }

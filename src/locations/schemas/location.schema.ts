@@ -3,11 +3,6 @@ import { Document } from 'mongoose';
 
 export type LocationDocument = Location & Document;
 
-export interface LocationGeoPoint {
-  type: 'Point';
-  coordinates: [number, number]; // [lng, lat] — ordre GeoJSON strict
-}
-
 export interface OpeningHoursEntry {
   day: number; // 0=dimanche … 6=samedi
   open: string; // "HH:mm"
@@ -25,6 +20,28 @@ export class LocationAddress {
   @Prop() lng?: number;
 }
 export const LocationAddressSchema = SchemaFactory.createForClass(LocationAddress);
+
+/**
+ * Sous-schéma de classe, PAS un objet littéral `{type: {type:{...}}}` — trouvé en
+ * exécutant réellement une écriture de `geo` (Prompt 5) : Mongoose interprète la clé
+ * `type` imbriquée à l'intérieur d'un autre `type:` comme un descripteur de type
+ * ambigu ("Cast to Object failed for value 'Point'"), jamais capturé avant puisque ce
+ * champ n'avait jamais été écrit avec une vraie valeur dans aucun test précédent. Un
+ * sous-schéma de classe (même pattern que `LocationAddress` ci-dessus) fait disparaître
+ * l'ambiguïté : `type` devient une propriété décorée normale, pas une clé de contrôle
+ * Mongoose. `Salon.location` (seed/schemas/salon.schema.ts) a la MÊME construction
+ * bugguée — jamais déclenchée car seul écrit via un script `strict:false` qui contourne
+ * la validation. Pas corrigé ici (hors scope de ce prompt), signalé dans le rapport.
+ */
+@Schema({ _id: false })
+export class LocationGeoPoint {
+  @Prop({ type: String, enum: ['Point'], default: 'Point' })
+  type: 'Point';
+
+  @Prop({ type: [Number] })
+  coordinates: [number, number]; // [lng, lat] — ordre GeoJSON strict
+}
+export const LocationGeoPointSchema = SchemaFactory.createForClass(LocationGeoPoint);
 
 /**
  * Location — Sprint 1 v2 (SKILL_saas_sprint1_tenant_isolation_v2, Prompt 1).
@@ -50,13 +67,7 @@ export class Location {
   @Prop({ type: LocationAddressSchema, default: () => ({}) })
   address: LocationAddress;
 
-  @Prop({
-    type: {
-      type: { type: String, enum: ['Point'], default: 'Point' },
-      coordinates: { type: [Number], default: undefined },
-    },
-    _id: false,
-  })
+  @Prop({ type: LocationGeoPointSchema })
   geo?: LocationGeoPoint;
 
   @Prop({ default: '' })

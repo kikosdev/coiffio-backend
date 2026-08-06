@@ -5,7 +5,7 @@ import { Staff, StaffDocument } from './schemas/staff.schema';
 import { Schedule, ScheduleDocument } from './schemas/schedule.schema';
 import { Salon, SalonDocument } from '../seed/schemas/salon.schema';
 import { AddOverrideDto, SetWeeklyDto } from './dto/team.dto';
-import { SalonScope } from '../common/scope/salon-scope';
+import { getTenantContext } from '../common/tenant/tenant-context';
 
 const DAY_NAMES = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
 
@@ -22,22 +22,24 @@ export class ScheduleService {
     @InjectModel(Salon.name) private readonly salonModel: Model<SalonDocument>,
   ) {}
 
-  private async assertStaff(scope: SalonScope, stylistId: string): Promise<StaffDocument> {
-    const s = await this.staffModel.findOne({ _id: stylistId, salonId: scope.salonId });
+  private async assertStaff(stylistId: string): Promise<StaffDocument> {
+    const s = await this.staffModel.findOne({ _id: stylistId });
     if (!s) throw new NotFoundException('Staff member not found.');
     return s;
   }
 
   /** Horaires d'ouverture du salon — utilisé par le frontend pour pré-filtrer les jours. */
-  async getSalonHours(scope: SalonScope) {
-    const salon = await this.salonModel.findById(scope.salonId).lean();
+  async getSalonHours() {
+    // `salons` est UNSCOPED (le doc tenant lui-même) — lookup par _id, pas un filtre
+    // `salonId` que le plugin pourrait injecter pour cette collection.
+    const salon = await this.salonModel.findById(getTenantContext().tenantId).lean();
     if (!salon) throw new NotFoundException('Salon introuvable.');
     return salon.businessHours ?? [];
   }
 
   /** Vérifie que chaque shift est dans un jour ouvert et dans les plages horaires du salon. */
-  private async validateAgainstSalon(scope: SalonScope, weekly: SetWeeklyDto['weekly']): Promise<void> {
-    const hours = await this.getSalonHours(scope);
+  private async validateAgainstSalon(weekly: SetWeeklyDto['weekly']): Promise<void> {
+    const hours = await this.getSalonHours();
     const byDay = new Map(hours.map((h) => [h.day, h]));
 
     for (const shift of weekly) {
@@ -60,10 +62,10 @@ export class ScheduleService {
     }
   }
 
-  async getSchedule(scope: SalonScope, stylistId: string): Promise<ScheduleDocument> {
-    await this.assertStaff(scope, stylistId);
+  async getSchedule(stylistId: string): Promise<ScheduleDocument> {
+    await this.assertStaff(stylistId);
     const doc = await this.scheduleModel.findOneAndUpdate(
-      { salonId: scope.salonId, stylistId: new Types.ObjectId(stylistId) },
+      { stylistId: new Types.ObjectId(stylistId) },
       { $setOnInsert: { weekly: [], overrides: [] } },
       { upsert: true, new: true },
     );
@@ -75,10 +77,10 @@ export class ScheduleService {
     return doc as ScheduleDocument;
   }
 
-  async setWeekly(scope: SalonScope, stylistId: string, dto: SetWeeklyDto): Promise<ScheduleDocument> {
-    const staff = await this.assertStaff(scope, stylistId);
+  async setWeekly(stylistId: string, dto: SetWeeklyDto): Promise<ScheduleDocument> {
+    const staff = await this.assertStaff(stylistId);
 
-    await this.validateAgainstSalon(scope, dto.weekly);
+    await this.validateAgainstSalon(dto.weekly);
 
     const weekly = dto.weekly.map((w) => ({
       day: w.day,
@@ -93,18 +95,18 @@ export class ScheduleService {
 
     // Keep Schedule.weekly in sync so booking engine and overview can read it.
     const doc = await this.scheduleModel.findOneAndUpdate(
-      { salonId: scope.salonId, stylistId: new Types.ObjectId(stylistId) },
+      { stylistId: new Types.ObjectId(stylistId) },
       { $set: { weekly }, $setOnInsert: { overrides: [] } },
       { upsert: true, new: true },
     );
     return doc as ScheduleDocument;
   }
 
-  async addOverride(scope: SalonScope, stylistId: string, dto: AddOverrideDto): Promise<ScheduleDocument> {
+  async addOverride(stylistId: string, dto: AddOverrideDto): Promise<ScheduleDocument> {
     if (dto.type === 'custom' && (!dto.start || !dto.end)) {
       throw new BadRequestException('A custom override requires start and end.');
     }
-    const doc = await this.getSchedule(scope, stylistId);
+    const doc = await this.getSchedule(stylistId);
     doc.overrides = doc.overrides.filter((o) => o.date !== dto.date);
     doc.overrides.push({
       date: dto.date,
@@ -117,8 +119,8 @@ export class ScheduleService {
     return doc;
   }
 
-  async removeOverride(scope: SalonScope, stylistId: string, date: string): Promise<ScheduleDocument> {
-    const doc = await this.getSchedule(scope, stylistId);
+  async removeOverride(stylistId: string, date: string): Promise<ScheduleDocument> {
+    const doc = await this.getSchedule(stylistId);
     doc.overrides = doc.overrides.filter((o) => o.date !== date);
     await doc.save();
     return doc;

@@ -1,13 +1,15 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { Request } from 'express';
 import { LocationService } from './location.service';
 import { CreateLocationDto, ListLocationsQueryDto, UpdateLocationDto } from './dto/location.dto';
 import { JwtGuard } from '../common/guards/jwt.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
-import { getSalonScope } from '../common/scope/salon-scope';
+import { currentScope } from '../common/scope/salon-scope';
 import { LocationDocument } from './schemas/location.schema';
+import { LimitGuard } from '../common/entitlements/guards/limit.guard';
+import { EnforcesLimit } from '../common/entitlements/decorators/enforces-limit.decorator';
+import { Destructive } from '../common/decorators/destructive.decorator';
 
 /**
  * Locations (Sprint 1 v2, Prompt 1). Lecture = tout user authentifié ; create/edit/delete
@@ -25,19 +27,18 @@ export class LocationController {
   @ApiResponse({ status: 200, description: 'OK' })
   @Get()
   async list(
-    @Req() req: Request,
     @Query() query: ListLocationsQueryDto,
   ): Promise<{ data: LocationDocument[]; message: string }> {
     const includeInactive = query.active === 'false';
-    const data = await this.locations.findAllForTenant(getSalonScope(req), includeInactive);
+    const data = await this.locations.findAllForTenant(currentScope(), includeInactive);
     return { data, message: 'OK' };
   }
 
   @ApiOperation({ summary: 'Get the primary location for the current salon' })
   @ApiResponse({ status: 200, description: 'OK' })
   @Get('primary')
-  async primary(@Req() req: Request): Promise<{ data: LocationDocument; message: string }> {
-    const data = await this.locations.findPrimary(getSalonScope(req));
+  async primary(): Promise<{ data: LocationDocument; message: string }> {
+    const data = await this.locations.findPrimary(currentScope());
     return { data, message: 'OK' };
   }
 
@@ -45,11 +46,12 @@ export class LocationController {
   @ApiResponse({ status: 201, description: 'Location created.' })
   @Post()
   @Roles('owner')
+  @UseGuards(LimitGuard)
+  @EnforcesLimit('locationsMax')
   async create(
-    @Req() req: Request,
     @Body() dto: CreateLocationDto,
   ): Promise<{ data: LocationDocument; message: string }> {
-    const data = await this.locations.create(getSalonScope(req), dto);
+    const data = await this.locations.create(currentScope(), dto);
     return { data, message: 'Location created.' };
   }
 
@@ -58,11 +60,10 @@ export class LocationController {
   @Patch(':id')
   @Roles('owner')
   async update(
-    @Req() req: Request,
     @Param('id') id: string,
     @Body() dto: UpdateLocationDto,
   ): Promise<{ data: LocationDocument; message: string }> {
-    const data = await this.locations.update(getSalonScope(req), id, dto);
+    const data = await this.locations.update(currentScope(), id, dto);
     return { data, message: 'Location updated.' };
   }
 
@@ -70,11 +71,11 @@ export class LocationController {
   @ApiResponse({ status: 200, description: 'Location deactivated.' })
   @Delete(':id')
   @Roles('owner')
+  @Destructive()
   async remove(
-    @Req() req: Request,
     @Param('id') id: string,
   ): Promise<{ data: LocationDocument; message: string }> {
-    const data = await this.locations.deactivate(getSalonScope(req), id);
+    const data = await this.locations.deactivate(currentScope(), id);
     return { data, message: 'Location deactivated.' };
   }
 }

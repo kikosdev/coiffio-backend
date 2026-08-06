@@ -19,6 +19,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { AuthModule } from '../auth/auth.module';
 import { BookingModule } from '../booking/booking.module';
 import { FinanceModule } from '../finance/finance.module';
+import { IdentityModule } from '../identity/identity.module';
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { FinanceModule } from '../finance/finance.module';
     AuthModule,
     BookingModule,
     FinanceModule,
+    IdentityModule,
     MongooseModule.forFeature([
       { name: Staff.name,        schema: StaffSchema },
       { name: Schedule.name,     schema: ScheduleSchema },

@@ -129,6 +129,12 @@ export class SetAcceptingBookingsDto {
   acceptingBookings: boolean;
 }
 
+export class UpdateStaffLocationsDto {
+  @IsArray()
+  @IsString({ each: true })
+  locationIds: string[];
+}
+
 export class PosPayDto {
   @IsIn(['cash', 'card'])
   method: 'cash' | 'card';

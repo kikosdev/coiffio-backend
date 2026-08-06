@@ -53,6 +53,28 @@ export interface SalonLocation {
   coordinates: [number, number]; // [lng, lat] — ordre GeoJSON strict
 }
 
+/**
+ * Sous-schéma de classe, PAS un objet littéral `{type: {type:{...}}}` — même bug que
+ * `LocationGeoPoint` (`locations/schemas/location.schema.ts`, corrigé au Prompt 1) : Mongoose
+ * interprète la clé `type` imbriquée à l'intérieur d'un autre `type:` comme un descripteur de
+ * type ambigu, pas une valeur littérale — un document créé sans même fournir `location`
+ * recevait quand même un défaut invalide `{type:{type:'Point'}}`, qui casse l'index
+ * `2dsphere` dès la première écriture réelle par le code applicatif (`insertOne`/`create()`
+ * Mongoose — jamais déclenché avant Prompt 8, seul écrit jusqu'ici via un script
+ * `strict:false` qui contourne la validation). Signalé comme dette #3, corrigé ici car
+ * `InternalService.provisionTenant` (Prompt 8) est le premier chemin de code applicatif
+ * réel à créer un `Salon` via ce schéma.
+ */
+@Schema({ _id: false })
+export class SalonGeoPoint {
+  @Prop({ type: String, enum: ['Point'], default: 'Point' })
+  type: 'Point';
+
+  @Prop({ type: [Number] })
+  coordinates: [number, number];
+}
+export const SalonGeoPointSchema = SchemaFactory.createForClass(SalonGeoPoint);
+
 @Schema({ timestamps: true })
 export class Salon {
   @Prop({ required: true }) name: string;
@@ -64,15 +86,15 @@ export class Salon {
   @Prop({ default: 'TND' }) currency: string;
   @Prop({ default: 19, min: 0, max: 100 }) taxRate: number;
 
+  // Cycle de vie du tenant (Prompt 8, provisioning — pas encore construit). Absent du
+  // schéma jusqu'ici ; défaut 'active' s'applique aussi aux documents existants au chargement
+  // (comportement standard Mongoose), donc aucun backfill requis pour ce champ précis.
+  @Prop({ type: String, enum: ['active', 'suspended', 'churned'], default: 'active', index: true })
+  status: 'active' | 'suspended' | 'churned';
+
   // Géolocalisation (SKILL_client_home_dynamic — HOME.0). Absent tant que le
   // salon n'a pas été géocodé (backfill) — jamais fabriqué côté lecture.
-  @Prop({
-    type: {
-      type: { type: String, enum: ['Point'], default: 'Point' },
-      coordinates: { type: [Number], default: undefined },
-    },
-    _id: false,
-  })
+  @Prop({ type: SalonGeoPointSchema })
   location?: SalonLocation;
 
   @Prop({

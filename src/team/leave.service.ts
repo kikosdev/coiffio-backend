@@ -5,10 +5,10 @@ import { LeaveRequest, LeaveRequestDocument, LeaveConflict } from './schemas/lea
 import { Appointment, AppointmentDocument } from '../booking/schemas/appointment.schema';
 import { Schedule, ScheduleDocument } from './schemas/schedule.schema';
 import { CreateLeaveRequestDto } from './dto/team.dto';
-import { SalonScope } from '../common/scope/salon-scope';
 import { AuthUser } from '../common/decorators/current-user.decorator';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SOCKET_EVENTS } from '../common/socket-events';
+import { getTenantContext } from '../common/tenant/tenant-context';
 
 const MANAGERS = ['owner', 'manager'];
 
@@ -31,7 +31,7 @@ export class LeaveService {
     return { start, end };
   }
 
-  async create(scope: SalonScope, requester: AuthUser, dto: CreateLeaveRequestDto): Promise<LeaveRequestDocument> {
+  async create(requester: AuthUser, dto: CreateLeaveRequestDto): Promise<LeaveRequestDocument> {
     const isManager = MANAGERS.includes(requester.role);
     // Un stylist ne peut déposer que pour lui-même ; owner/manager pour n'importe quel staff.
     const stylistId = isManager && dto.stylistId ? dto.stylistId : requester.sub;
@@ -40,7 +40,6 @@ export class LeaveService {
     }
     this.rangeBounds(dto.range.from, dto.range.to); // valide la plage
     const created = await this.leaveModel.create({
-      salonId: scope.salonId,
       stylistId: new Types.ObjectId(stylistId),
       swapWithId: dto.swapWithId ? new Types.ObjectId(dto.swapWithId) : undefined,
       type: dto.type,
@@ -50,14 +49,15 @@ export class LeaveService {
       conflicts: [],
     });
     // leave.requested → owner + manager (#4 : diffusion par rôle).
+    const salonId = getTenantContext().tenantId;
     const payload = { leaveRequestId: created._id.toString(), stylistId, range: dto.range };
-    void this.notifications.dispatch({ salonId: scope.salonId, role: 'owner', type: SOCKET_EVENTS.LEAVE_REQUESTED, payload });
-    void this.notifications.dispatch({ salonId: scope.salonId, role: 'manager', type: SOCKET_EVENTS.LEAVE_REQUESTED, payload });
+    void this.notifications.dispatch({ salonId, role: 'owner', type: SOCKET_EVENTS.LEAVE_REQUESTED, payload });
+    void this.notifications.dispatch({ salonId, role: 'manager', type: SOCKET_EVENTS.LEAVE_REQUESTED, payload });
     return created;
   }
 
-  async list(scope: SalonScope, requester: AuthUser, status?: string): Promise<LeaveRequestDocument[]> {
-    const filter: FilterQuery<LeaveRequestDocument> = { salonId: scope.salonId };
+  async list(requester: AuthUser, status?: string): Promise<LeaveRequestDocument[]> {
+    const filter: FilterQuery<LeaveRequestDocument> = {};
     if (status) filter.status = status;
     // Stylist : ne voit que ses propres demandes.
     if (!MANAGERS.includes(requester.role)) filter.stylistId = new Types.ObjectId(requester.sub);
@@ -65,7 +65,6 @@ export class LeaveService {
   }
 
   private async findConflicts(
-    scope: SalonScope,
     stylistId: Types.ObjectId,
     start: Date,
     end: Date,
@@ -73,7 +72,6 @@ export class LeaveService {
     // Chevauchement : appointment.start < rangeEnd && appointment.end > rangeStart, status != cancelled (#6).
     const overlapping = await this.apptModel
       .find({
-        salonId: scope.salonId,
         stylistId,
         status: { $ne: 'cancelled' },
         start: { $lt: end },
@@ -95,15 +93,15 @@ export class LeaveService {
    * (jamais d'auto-résolution). Le manager doit réassigner/annuler les bookings d'abord.
    * Sans conflit : approuvé ET override `leave` posé sur la rota pour chaque jour de la plage.
    */
-  async approve(scope: SalonScope, decider: AuthUser, id: string): Promise<LeaveRequestDocument> {
-    const req = await this.leaveModel.findOne({ _id: id, salonId: scope.salonId });
+  async approve(decider: AuthUser, id: string): Promise<LeaveRequestDocument> {
+    const req = await this.leaveModel.findOne({ _id: id });
     if (!req) throw new NotFoundException('Leave request not found.');
     if (req.status !== 'pending') {
       throw new BadRequestException(`Request already ${req.status}.`);
     }
 
     const { start, end } = this.rangeBounds(req.range.from, req.range.to);
-    const conflicts = await this.findConflicts(scope, req.stylistId as Types.ObjectId, start, end);
+    const conflicts = await this.findConflicts(req.stylistId as Types.ObjectId, start, end);
     if (conflicts.length > 0) {
       req.conflicts = conflicts; // persiste pour l'UI
       await req.save();
@@ -121,13 +119,13 @@ export class LeaveService {
     await req.save();
 
     // Pose les overrides 'leave' sur la rota (1 par jour de la plage).
-    await this.applyLeaveOverrides(scope, req.stylistId as Types.ObjectId, req.range.from, req.range.to);
+    await this.applyLeaveOverrides(req.stylistId as Types.ObjectId, req.range.from, req.range.to);
 
     return req;
   }
 
-  async reject(scope: SalonScope, decider: AuthUser, id: string): Promise<LeaveRequestDocument> {
-    const req = await this.leaveModel.findOne({ _id: id, salonId: scope.salonId });
+  async reject(decider: AuthUser, id: string): Promise<LeaveRequestDocument> {
+    const req = await this.leaveModel.findOne({ _id: id });
     if (!req) throw new NotFoundException('Leave request not found.');
     if (req.status !== 'pending') throw new BadRequestException(`Request already ${req.status}.`);
     req.status = 'rejected';
@@ -138,13 +136,12 @@ export class LeaveService {
   }
 
   private async applyLeaveOverrides(
-    scope: SalonScope,
     stylistId: Types.ObjectId,
     from: string,
     to: string,
   ): Promise<void> {
     const schedule = await this.scheduleModel.findOneAndUpdate(
-      { salonId: scope.salonId, stylistId },
+      { stylistId },
       { $setOnInsert: { weekly: [], overrides: [] } },
       { upsert: true, new: true },
     );

@@ -32,15 +32,17 @@ export class PublicService {
     @InjectModel(Testimonial.name) private readonly testimonialModel: Model<TestimonialDocument>,
   ) {}
 
+  /**
+   * Sprint 2 v2 Prompt 4 : le fallback `DEFAULT_SALON_ID` a été retiré — il aurait servi le
+   * MAUVAIS salon en silence pour un slug introuvable/typo, exactement le bug que ce prompt
+   * corrige ailleurs (`resolveSalonId()`/`register()`). Le fallback "1 seul salon en base →
+   * le renvoyer" reste : contrairement à `DEFAULT_SALON_ID`, il s'auto-désactive dès qu'un
+   * 2e tenant existe (jamais un risque en usage multi-tenant réel), utile seulement au
+   * confort dev/local à 1 salon.
+   */
   async getSalonBySlug(slug: string): Promise<SalonDocument> {
     const bySlug = await this.salonModel.findOne({ slug }).lean<SalonDocument>();
     if (bySlug) return bySlug;
-
-    const defaultId = process.env.DEFAULT_SALON_ID;
-    if (defaultId) {
-      const byId = await this.salonModel.findById(defaultId).lean<SalonDocument>();
-      if (byId) return byId;
-    }
 
     const count = await this.salonModel.countDocuments();
     if (count === 1) {
@@ -52,9 +54,12 @@ export class PublicService {
   }
 
   /**
-   * Discovery-only cross-salon list (SKILL_home_list_all_salons) — deliberately not scoped
-   * via getSalonScope(). No `isActive` field exists on Salon today, so every seeded salon
-   * is returned; add that filter once the field lands rather than fabricating it here.
+   * Discovery-only cross-salon list (SKILL_home_list_all_salons) — deliberately not tenant-
+   * scoped at all (cross-salon by design). No `isActive` field exists on Salon today, so
+   * every seeded salon is returned; add that filter once the field lands rather than
+   * fabricating it here. Superseded by DiscoveryService (Prompt 5) for new consumers, but
+   * left in place since removing it would be an API contract change (out of this prompt's
+   * scope).
    */
   async listAll(): Promise<PublicSalonSummary[]> {
     const salons = await this.salonModel

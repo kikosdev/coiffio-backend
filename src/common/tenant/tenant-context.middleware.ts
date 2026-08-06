@@ -1,42 +1,60 @@
-import { ForbiddenException, Injectable, Logger, NestMiddleware, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, HttpException, HttpStatus, Injectable, Logger, NestMiddleware, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { JwtService } from '@nestjs/jwt';
 import { Model } from 'mongoose';
 import { NextFunction, Request, Response } from 'express';
-import { AuthUser } from '../decorators/current-user.decorator';
+import { AuthUser, LegacyAuthPayload } from '../decorators/current-user.decorator';
 import { extractToken } from '../guards/jwt.guard';
 import { Staff, StaffDocument } from '../../team/schemas/staff.schema';
+import { Salon, SalonDocument } from '../../seed/schemas/salon.schema';
 import { LocationService } from '../../locations/location.service';
+import { EntitlementsService } from '../entitlements/entitlements.service';
+import { MembershipService } from '../../identity/membership.service';
 import { runWithTenant, TenantContext, TenantRole } from './tenant-context';
 import { TenantMisconfiguredException } from './tenant-misconfigured.exception';
+import { PosTokenPayload } from '../../auth/dto/auth.dto';
 
-// Sprint 1 — le Control Plane (Prompt 7) n'existe pas encore : pas de JWT d'entitlements
-// à vérifier. Fallback explicite sur le plan 'starter', loggé en warn à chaque requête
-// tant que Prompt 7 n'est pas branché (bruyant par design, spec l'exige — à revoir une
-// fois l'entitlements service en place).
-const STARTER_PLAN_DEFAULTS = { plan: 'starter', features: {}, limits: {} } as const;
+const MUTATING_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'];
 
 /**
- * TenantContext middleware (Sprint 1 v2, Prompt 2).
+ * TenantContext middleware (Sprint 1 v2 Prompt 2 → Sprint 2 v2 Prompt 2).
  *
- * Design : un token absent OU invalide n'est PAS traité comme une erreur de résolution —
- * la requête continue sans contexte tenant établi. L'authentification proprement dite
- * reste la responsabilité de JwtGuard sur chaque contrôleur (déjà en place) ; ce
- * middleware n'a pas vocation à devenir une seconde porte d'auth avec une sémantique
- * différente, et beaucoup de routes publiques (public/*, marketplace, salons/nearby)
- * n'ont ni JWT ni :salonSlug exploitable ici (les path params NestJS ne sont pas encore
- * liés à ce stade du pipeline Express — seul Prompt 5/DiscoveryService, avec ses propres
- * routes dédiées, pourra résoudre proprement le cas guest par slug).
+ * Design (inchangé depuis Sprint 1) : un token absent OU invalide n'est PAS traité comme
+ * une erreur de résolution — la requête continue sans contexte tenant établi.
+ * L'authentification proprement dite reste incarnée ici (voir plus bas) : ce middleware
+ * est désormais le SEUL endroit qui décode le JWT et peuple `req.user` — `JwtGuard`/
+ * `OptionalJwtGuard` ne font plus que vérifier que cette résolution a eu lieu (voir leurs
+ * docstrings). Nécessaire parce que résoudre `req.user.role`/`.salonId` demande maintenant
+ * la MÊME logique memberships que `TenantContext` — les calculer deux fois indépendamment
+ * (comme avant, un décodage ici + un décodage dans JwtGuard) risquerait de diverger.
  *
- * En revanche, DÈS QU'un JWT valide identifie un tenant, la résolution qui suit ne
- * tolère plus aucun fallback silencieux : toute incohérence (header locationId hors
- * scope, aucune location primaire) throw. C'est le sens strict de la contrainte
- * "jamais d'erreur de résolution avalée" — elle s'applique à partir du moment où il y a
- * effectivement quelque chose à résoudre.
+ * ⚠️ Sprint 2 v2 Prompt 2 : le JWT ne porte plus `payload.salonId`/`payload.role` figés —
+ * il porte `payload.memberships[]` (voir `AuthTokenPayload`). Le tenant actif est résolu
+ * PAR REQUÊTE :
+ *   1. `payload.scope === 'pos'` → `payload.salonId`, verrouillé (`handlePosToken`,
+ *      INCHANGÉ — le token POS garde sa forme actuelle, `{staffId,salonId,scope,role}`,
+ *      voir la note sur `PosTokenPayload` dans sa docstring).
+ *   2. Header `x-tenant-id` → doit être un tenant où le user a un membership ACTIF.
+ *   3. Sous-domaine/slug → pas d'infrastructure de sous-domaine dans cet environnement
+ *      (dev: localhost/127.0.0.1) — no-op structurel pour l'instant, prêt à être complété.
+ *   4. Un seul membership actif → ce tenant.
+ *   5. Sinon → 400 `{code:'TENANT_REQUIRED', memberships:[...]}`.
  *
- * ⚠️ tenantId = payload.salonId est un PLACEHOLDER Sprint 1. Le Sprint 2 (Membership)
- * remplacera cette source par la résolution multi-tenant via memberships — ne rien
- * construire de définitif sur cette lecture directe du JWT.
+ * La liste des memberships ACTIFS n'est PAS lue depuis le JWT (qui reste valide 7 jours,
+ * pas de refresh ce sprint — décision explicite) mais relue depuis la base à CHAQUE
+ * requête, via `MembershipService.findByUserCached()` (cache 60s, clé `mbr:{userId}`) :
+ * c'est ce qui fait qu'une révocation ou un changement de `locationIds` se propage en
+ * ≤60s au lieu d'attendre l'expiration du token. Le JWT ne sert plus qu'à identifier le
+ * user (`sub`) et à distinguer un token neuf d'un ancien (voir le fallback ci-dessous).
+ *
+ * ⚠️ FALLBACK TRANSITOIRE — tokens émis AVANT ce déploiement (jusqu'à 7 jours après, vu
+ * `JWT_EXPIRES=7d` et l'absence de refresh ce sprint) portent encore l'ancien format
+ * `{salonId, role, staffId?, clientId?}` sans `memberships`. Détecté via l'absence du
+ * champ `memberships` dans le payload décodé — reconstruit un membership "candidat" depuis
+ * `payload.salonId`, mais celui-ci est ENSUITE VÉRIFIÉ contre les memberships actifs réels
+ * (même logique que le chemin normal) : un ancien token dont l'accès a été révoqué depuis
+ * est donc bloqué, pas juste toléré aveuglément. À SUPPRIMER 7 jours après le déploiement
+ * de ce changement en prod (chercher ce commentaire).
  */
 @Injectable()
 export class TenantContextMiddleware implements NestMiddleware {
@@ -45,7 +63,10 @@ export class TenantContextMiddleware implements NestMiddleware {
   constructor(
     private readonly jwt: JwtService,
     @InjectModel(Staff.name) private readonly staffModel: Model<StaffDocument>,
+    @InjectModel(Salon.name) private readonly salonModel: Model<SalonDocument>,
     private readonly locations: LocationService,
+    private readonly entitlements: EntitlementsService,
+    private readonly memberships: MembershipService,
   ) {}
 
   async use(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -55,47 +76,86 @@ export class TenantContextMiddleware implements NestMiddleware {
       return;
     }
 
-    let payload: AuthUser;
+    let payload: Record<string, unknown>;
     try {
-      payload = await this.jwt.verifyAsync<AuthUser>(token);
+      payload = await this.jwt.verifyAsync<Record<string, unknown>>(token);
     } catch {
       // Token présent mais invalide/expiré : pas une erreur de résolution tenant — on
-      // laisse passer sans contexte. JwtGuard, sur les routes qui l'exigent, rejettera
-      // la requête lui-même avec le même message qu'aujourd'hui.
+      // laisse passer sans contexte. JwtGuard rejettera la requête lui-même (401).
       next();
       return;
     }
 
-    // ⚠️ PLACEHOLDER Sprint 1 — voir docstring de la classe.
-    const tenantId = payload.salonId;
-    if (!tenantId) {
+    if (payload.scope === 'pos') {
+      await this.handlePosToken(req, payload as unknown as PosTokenPayload, next);
+      return;
+    }
+
+    const userId = payload.sub as string | undefined;
+    if (!userId) {
       next();
       return;
     }
 
-    const scope = { salonId: tenantId };
-    const role = payload.role as TenantRole;
+    const isLegacyToken = !Array.isArray(payload.memberships);
+    const activeMemberships = await this.memberships.findByUserCached(userId);
 
-    // Bootstrap : `staffs` est TENANT_SCOPED, donc cette lecture doit déjà tourner sous un
-    // contexte pour satisfaire le plugin — alors même que c'est CETTE lecture qui sert à
-    // construire le contexte final (locationId/locationIds pas encore connus, d'où les
-    // placeholders). Trouvé en re-testant Prompt 4 de bout en bout : sans ce wrapper,
-    // TOUT login stylist/colorist authentifié aurait throw "No tenant context available"
-    // dès sa première requête — jamais capturé avant car ni le boot ni les tests isolés
-    // du plugin (Prompt 3) n'exerçaient ce chemin précis.
-    let staff: StaffDocument | null = null;
-    if (payload.staffId) {
-      staff = await runWithTenant(
-        { tenantId, locationId: '', locationIds: [], role, plan: 'starter', features: {}, limits: {} },
-        () => this.staffModel.findById(payload.staffId).select('locationIds defaultLocationId').exec(),
+    let candidateTenantId: string | undefined;
+    const headerTenantId = req.header('x-tenant-id');
+
+    if (isLegacyToken) {
+      // Voir le ⚠️ FALLBACK TRANSITOIRE dans la docstring de la classe.
+      candidateTenantId = (payload as unknown as LegacyAuthPayload).salonId;
+      if (!candidateTenantId) {
+        next();
+        return;
+      }
+    } else if (headerTenantId) {
+      candidateTenantId = headerTenantId;
+    } else if (activeMemberships.length === 1) {
+      candidateTenantId = activeMemberships[0].tenantId;
+    }
+    // Étape 3 (sous-domaine/slug) : aucune infrastructure de sous-domaine dans cet
+    // environnement — no-op structurel, voir la docstring de la classe.
+
+    if (!candidateTenantId) {
+      throw new HttpException(
+        {
+          code: 'TENANT_REQUIRED',
+          message: 'Multiple tenants available for this account — specify X-Tenant-Id.',
+          memberships: activeMemberships.map((m) => ({ tenantId: m.tenantId, role: m.role })),
+        },
+        HttpStatus.BAD_REQUEST,
       );
     }
 
-    const locationIds =
-      role === 'stylist' || role === 'colorist'
-        ? (staff?.locationIds ?? [])
-        : (await this.locations.findAllForTenant(scope)).map((l) => l._id.toString());
+    const activeMembership = activeMemberships.find((m) => m.tenantId === candidateTenantId);
+    if (!activeMembership) {
+      // Couvre 2 cas à la fois : header pointant un tenant sans membership actif (403,
+      // spec) ET ancien token dont le membership a depuis été révoqué (idem, ≤60s après
+      // la révocation grâce au cache — jamais 7 jours).
+      throw new HttpException(
+        { code: 'TENANT_FORBIDDEN', message: 'No active membership for this tenant.' },
+        HttpStatus.FORBIDDEN,
+      );
+    }
 
+    const tenantId = activeMembership.tenantId;
+    const role = activeMembership.role as TenantRole;
+    const staffId = activeMembership.staffId?.toString();
+    const clientId = activeMembership.clientId?.toString();
+
+    // Prompt 8 (Sprint 1) : cycle de vie du tenant (`salons` est UNSCOPED — lisible sans
+    // contexte). churned → accès coupé entièrement. suspended → lecture seule.
+    const salon = await this.salonModel.findById(tenantId).select('status').lean();
+    if (salon?.status === 'churned') {
+      throw new HttpException({ code: 'TENANT_CHURNED', message: 'This tenant is no longer active.' }, HttpStatus.FORBIDDEN);
+    }
+    if (salon?.status === 'suspended' && MUTATING_METHODS.includes(req.method)) {
+      throw new HttpException({ code: 'TENANT_SUSPENDED', message: 'This salon is suspended — read-only.' }, HttpStatus.PAYMENT_REQUIRED);
+    }
+
+    const locationIds = activeMembership.locationIds ?? [];
     const headerLocationId = req.header('x-location-id');
     let locationId: string;
 
@@ -107,36 +167,161 @@ export class TenantContextMiddleware implements NestMiddleware {
         });
       }
       locationId = headerLocationId;
-    } else if (staff?.defaultLocationId) {
-      locationId = staff.defaultLocationId;
+    } else if (activeMembership.defaultLocationId) {
+      locationId = activeMembership.defaultLocationId;
     } else {
-      try {
-        const primary = await this.locations.findPrimary(scope);
-        locationId = primary._id.toString();
-      } catch (err) {
-        if (!(err instanceof NotFoundException)) throw err;
-        // Un tenant sans location primaire est un incident de provisioning, pas un 404
-        // ordinaire — diagnosticable immédiatement plutôt que noyé dans des 404 répétés.
-        this.logger.error(`No primary location for tenant ${tenantId} — provisioning incomplete or primary was deleted.`);
-        throw new TenantMisconfiguredException(tenantId, 'no primary location configured');
-      }
+      // Fallback rare (Membership sans defaultLocationId — ex. migration ancienne) :
+      // `locations` est TENANT_SCOPED, ce lookup a donc besoin d'un contexte bootstrap.
+      // C'est désormais le SEUL point de ce middleware qui en a besoin (le lookup staff
+      // qui causait 4 récidives du même bug au Sprint 1 a disparu — locationIds/
+      // defaultLocationId viennent maintenant du Membership, jamais d'un nouveau lookup
+      // staff ici).
+      const bootstrapCtx: TenantContext = { tenantId, locationId: '', locationIds, role, plan: 'starter', features: {}, limits: {} };
+      locationId = await runWithTenant(bootstrapCtx, async () => {
+        try {
+          const primary = await this.locations.findPrimary({ salonId: tenantId });
+          return primary._id.toString();
+        } catch (err) {
+          if (!(err instanceof NotFoundException)) throw err;
+          this.logger.error(`No primary location for tenant ${tenantId} — provisioning incomplete or primary was deleted.`);
+          throw new TenantMisconfiguredException(tenantId, 'no primary location configured');
+        }
+      });
     }
 
-    this.logger.warn(
-      `Entitlements JWT not implemented yet (Prompt 7) — tenant ${tenantId} falling back to plan '${STARTER_PLAN_DEFAULTS.plan}'.`,
-    );
+    // Prompt 7 (Sprint 1) : ne throw jamais, ne bloque jamais — fallback 'starter' + log
+    // error géré entièrement par le service.
+    const resolved = await this.entitlements.resolve(tenantId);
+
+    const impersonatedBy = payload.impersonatedBy as string | undefined;
+    const impersonationReason = payload.impersonationReason as string | undefined;
+    if (impersonatedBy) {
+      this.logger.warn(
+        `Impersonated request: tenant=${tenantId} admin=${impersonatedBy} reason="${impersonationReason ?? ''}" ${req.method} ${req.path}`,
+      );
+    }
 
     const ctx: TenantContext = {
       tenantId,
       locationId,
       locationIds,
       role,
-      userId: payload.sub,
+      userId,
+      staffId,
+      clientId,
+      plan: resolved.plan,
+      features: resolved.features,
+      limits: resolved.limits,
+      flags: resolved.flags, // [Delta 3]
+      impersonatedBy,
+    };
+
+    // Sprint 2 v2 Prompt 2 : req.user est désormais peuplé ICI (résolu depuis le
+    // membership actif), plus par JwtGuard/OptionalJwtGuard qui décodaient indépendamment
+    // le JWT brut — celui-ci ne porte plus role/salonId à la racine, un décodage
+    // indépendant y lirait `undefined` partout. `name`/`email`/`phone` ne sont plus
+    // peuplés (le nouveau JWT ne les porte pas — voir la docstring d'`AuthUser`).
+    // `role`/`accountType` castés : TenantRole inclut 'guest' (jamais possible ici, un
+    // Membership n'a que owner|manager|stylist|colorist|client), Role (AuthUser) non.
+    (req as Request & { user?: AuthUser }).user = {
+      sub: userId,
+      salonId: tenantId,
+      role: role as AuthUser['role'],
+      accountType: clientId ? 'client' : 'staff',
+      staffId,
+      clientId,
+      impersonatedBy,
+      impersonationReason,
+    };
+
+    runWithTenant(ctx, () => next());
+  }
+
+  /**
+   * Token POS — INCHANGÉ (spec Sprint 2 v2 Prompt 2 : "Token POS INCHANGÉ... Ne pas y
+   * toucher"). ⚠️ Écart signalé, pas deviné : la section "Contrat de token cible" du SKILL
+   * décrit le payload POS comme `{sub, scope:'pos', tenantId, locationId, staffId, role}`,
+   * mais le payload RÉEL (émis par `AuthService.loginPin()`, `PosTokenPayload` dans
+   * `auth.dto.ts`) est `{staffId, salonId, scope:'pos', role}` — pas de `sub`, `salonId`
+   * pas `tenantId`, pas de `locationId` dans le token (résolu ici comme avant, via un
+   * lookup staff). Le SKILL décrit une forme aspirationnelle qui ne correspond pas à ce
+   * qui a réellement été livré au Sprint 1 — je n'ai RIEN renommé (conforme à "ne pas y
+   * toucher"), cette méthode lit les champs RÉELS. Logique IDENTIQUE à l'ancien chemin
+   * générique (bootstrap `runWithTenant` + lookup staff pour locationIds/defaultLocationId
+   * — nécessaire ici, contrairement au chemin memberships ci-dessus, puisqu'un token POS
+   * n'a pas de Membership associé).
+   */
+  private async handlePosToken(req: Request, payload: PosTokenPayload, next: NextFunction): Promise<void> {
+    const tenantId = payload.salonId;
+    if (!tenantId) {
+      next();
+      return;
+    }
+
+    const salon = await this.salonModel.findById(tenantId).select('status').lean();
+    if (salon?.status === 'churned') {
+      throw new HttpException({ code: 'TENANT_CHURNED', message: 'This tenant is no longer active.' }, HttpStatus.FORBIDDEN);
+    }
+    if (salon?.status === 'suspended' && MUTATING_METHODS.includes(req.method)) {
+      throw new HttpException({ code: 'TENANT_SUSPENDED', message: 'This salon is suspended — read-only.' }, HttpStatus.PAYMENT_REQUIRED);
+    }
+
+    const scope = { salonId: tenantId };
+    const role = payload.role as TenantRole;
+
+    const bootstrapCtx: TenantContext = { tenantId, locationId: '', locationIds: [], role, plan: 'starter', features: {}, limits: {} };
+    const { locationIds, locationId } = await runWithTenant(bootstrapCtx, async () => {
+      const staff = payload.staffId
+        ? await this.staffModel.findById(payload.staffId).select('locationIds defaultLocationId').exec()
+        : null;
+
+      const locationIds =
+        role === 'stylist' || role === 'colorist'
+          ? (staff?.locationIds ?? [])
+          : (await this.locations.findAllForTenant(scope)).map((l) => l._id.toString());
+
+      // Token POS verrouillé (spec) : x-tenant-id n'est JAMAIS lu ici. x-location-id reste
+      // utile si le kiosque change de poste dans le même tenant.
+      const headerLocationId = req.header('x-location-id');
+      let locationId: string;
+      if (headerLocationId) {
+        if (!locationIds.includes(headerLocationId)) {
+          throw new ForbiddenException({ code: 'LOCATION_OUT_OF_SCOPE', message: 'The requested location is not accessible to this account.' });
+        }
+        locationId = headerLocationId;
+      } else if (staff?.defaultLocationId) {
+        locationId = staff.defaultLocationId;
+      } else {
+        try {
+          const primary = await this.locations.findPrimary(scope);
+          locationId = primary._id.toString();
+        } catch (err) {
+          if (!(err instanceof NotFoundException)) throw err;
+          this.logger.error(`No primary location for tenant ${tenantId} — provisioning incomplete or primary was deleted.`);
+          throw new TenantMisconfiguredException(tenantId, 'no primary location configured');
+        }
+      }
+      return { locationIds, locationId };
+    });
+
+    const resolved = await this.entitlements.resolve(tenantId);
+    const ctx: TenantContext = {
+      tenantId,
+      locationId,
+      locationIds,
+      role,
       staffId: payload.staffId,
-      clientId: payload.clientId,
-      plan: STARTER_PLAN_DEFAULTS.plan,
-      features: { ...STARTER_PLAN_DEFAULTS.features },
-      limits: { ...STARTER_PLAN_DEFAULTS.limits },
+      plan: resolved.plan,
+      features: resolved.features,
+      limits: resolved.limits,
+    };
+
+    (req as Request & { user?: AuthUser }).user = {
+      sub: payload.staffId,
+      salonId: tenantId,
+      role: role as AuthUser['role'],
+      accountType: 'staff',
+      staffId: payload.staffId,
     };
 
     runWithTenant(ctx, () => next());

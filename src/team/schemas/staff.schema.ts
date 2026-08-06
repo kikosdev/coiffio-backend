@@ -29,8 +29,13 @@ export class Staff {
   @Prop({ type: String, required: true, index: true })
   salonId: string;
 
-  // Lien vers users (Identity Service). OBLIGATOIRE — tout staff a un compte.
-  @Prop({ type: Types.ObjectId, ref: 'User', required: true, index: true })
+  // Lien vers users (Identity Service). OBLIGATOIRE — tout staff a un compte. Index posé plus
+  // bas (`StaffSchema.index({userId:1,salonId:1},{unique:true})`) — PAS ici via `index:true`,
+  // pour la même raison qu'avant (une seule déclaration sur cette clé, jamais deux qui
+  // divergent). Sprint 2 v2 Prompt 3 (Option B, owner multi-tenant) : plus un seul profil
+  // staff par identité globalement — un par (userId, salonId), un même user peut être staff
+  // dans N tenants (ex. owner du tenant A, stylist du tenant B).
+  @Prop({ type: Types.ObjectId, ref: 'User', required: true })
   userId: Types.ObjectId;
 
   @Prop({ required: true })
@@ -124,5 +129,7 @@ export const StaffSchema = SchemaFactory.createForClass(Staff);
 StaffSchema.index({ salonId: 1, role: 1 });
 // email unique PAR salon — sparse pour tolérer les membres sans email.
 StaffSchema.index({ salonId: 1, email: 1 }, { unique: true, sparse: true });
-// userId unique globalement — un seul profil staff par identité.
-StaffSchema.index({ userId: 1 }, { unique: true });
+// (userId, salonId) unique — un seul profil staff PAR TENANT, mais un même user peut avoir
+// un profil staff dans N tenants (Sprint 2 v2 Prompt 3, Option B). Remplace l'ancien index
+// global {userId:1} unique (migration : src/scripts/migrate-staff-userid-index.ts).
+StaffSchema.index({ userId: 1, salonId: 1 }, { unique: true });

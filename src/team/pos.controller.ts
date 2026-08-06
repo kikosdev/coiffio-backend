@@ -16,6 +16,8 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationDocument } from '../notifications/schemas/notification.schema';
 import { FinanceService } from '../finance/finance.service';
 import { PosPayDto } from './dto/team.dto';
+import { FeatureGuard } from '../common/entitlements/guards/feature.guard';
+import { RequiresFeature } from '../common/entitlements/decorators/requires-feature.decorator';
 
 interface RosterCard {
   id: string;
@@ -107,7 +109,8 @@ function computeColumn(
 @ApiTags('POS')
 @ApiBearerAuth()
 @Controller('pos')
-@UseGuards(PosScopeGuard)
+@UseGuards(PosScopeGuard, FeatureGuard)
+@RequiresFeature('pos')
 export class PosController {
   constructor(
     @InjectModel(Staff.name) private readonly staffModel: Model<StaffDocument>,
@@ -123,13 +126,9 @@ export class PosController {
   @ApiOperation({ summary: 'Get the POS staff roster, on-shift status first' })
   @ApiResponse({ status: 200, description: 'OK' })
   @Get('roster')
-  async getRoster(
-    @CurrentPosUser() caller: PosUser,
-  ): Promise<{ data: RosterCard[]; message: string }> {
-    const salonId = caller.salonId; // String — Mongoose casts on write, but never assume on read
-
+  async getRoster(): Promise<{ data: RosterCard[]; message: string }> {
     const staffList = await this.staffModel
-      .find({ salonId, isActive: true, posEnabled: true })
+      .find({ isActive: true, posEnabled: true })
       .select('name color role lastClockIn')
       .lean();
 
@@ -137,7 +136,7 @@ export class PosController {
 
     const staffIds = staffList.map((s) => s._id);
     const profiles = await this.profileModel
-      .find({ salonId, userId: { $in: staffIds } })
+      .find({ userId: { $in: staffIds } })
       .select('userId level')
       .lean();
 
@@ -176,13 +175,9 @@ export class PosController {
   @ApiOperation({ summary: 'Get the team roster (RH view, derived on-shift status from weekly schedule)' })
   @ApiResponse({ status: 200, description: 'OK' })
   @Get('team')
-  async getTeam(
-    @CurrentPosUser() caller: PosUser,
-  ): Promise<{ data: TeamCard[]; message: string }> {
-    const salonId = caller.salonId;                    // ✅ String, invariant #1
-
+  async getTeam(): Promise<{ data: TeamCard[]; message: string }> {
     const staffList = await this.staffModel
-      .find({ salonId, isActive: true })
+      .find({ isActive: true })
       .select('name color role week')
       .lean();
 
@@ -190,7 +185,7 @@ export class PosController {
 
     const staffIds = staffList.map((s) => s._id);
     const profiles = await this.profileModel
-      .find({ salonId, userId: { $in: staffIds } })    // ⚠️ vérifie le type de userId (cf. note)
+      .find({ userId: { $in: staffIds } })    // ⚠️ vérifie le type de userId (cf. note)
       .select('userId level')
       .lean();
 
@@ -219,13 +214,9 @@ export class PosController {
   @ApiOperation({ summary: 'Get the active service catalog for the POS' })
   @ApiResponse({ status: 200, description: 'OK' })
   @Get('catalog')
-  async getCatalog(
-    @CurrentPosUser() caller: PosUser,
-  ): Promise<{ data: CatalogItem[]; message: string }> {
-    const salonId = caller.salonId; // String — Mongoose casts on write, but never assume on read
-
+  async getCatalog(): Promise<{ data: CatalogItem[]; message: string }> {
     const services = await this.serviceModel
-      .find({ salonId, active: true })
+      .find({ active: true })
       .select('name category price durationMin')
       .sort({ category: 1, name: 1 })
       .lean();
@@ -245,13 +236,11 @@ export class PosController {
   @ApiResponse({ status: 200, description: 'OK' })
   @Get('today')
   async getToday(
-    @CurrentPosUser() caller: PosUser,
     @Query('date') date?: string,
   ): Promise<{ data: TodayAppt[]; message: string }> {
     if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       throw new BadRequestException('date must be yyyy-MM-dd.');
     }
-    const salonId = caller.salonId; // String — Mongoose casts on write, but never assume on read
     const now = new Date();
     const dateStr = date ?? todayIso();
     // Same UTC-labeled-as-Tunis convention the booking engine uses everywhere (dateAtMin) —
@@ -261,7 +250,6 @@ export class PosController {
 
     const appts = await this.apptModel
       .find({
-        salonId,
         start: { $gte: dayStart, $lt: dayEnd },
         status: { $nin: ['cancelled'] },
       })
@@ -319,11 +307,9 @@ export class PosController {
   @ApiResponse({ status: 200, description: 'OK' })
   @Get('appointments/:id')
   async getAppointmentDetail(
-    @CurrentPosUser() caller: PosUser,
     @Param('id') id: string,
   ): Promise<{ data: PosApptDetail; message: string }> {
-    const salonId = caller.salonId; // String — Mongoose casts on write, but never assume on read
-    const appt = await this.apptModel.findOne({ _id: id, salonId }).lean();
+    const appt = await this.apptModel.findOne({ _id: id }).lean();
     if (!appt) throw new NotFoundException('Appointment not found.');
 
     const [client, services, stylist] = await Promise.all([
@@ -364,11 +350,9 @@ export class PosController {
   @ApiResponse({ status: 201, description: 'Checked in.' })
   @Post('appointments/:id/check-in')
   async checkIn(
-    @CurrentPosUser() caller: PosUser,
     @Param('id') id: string,
   ): Promise<{ data: { ok: boolean; checkedInAt: string }; message: string }> {
-    const salonId = caller.salonId;
-    const appt = await this.apptModel.findOne({ _id: id, salonId });
+    const appt = await this.apptModel.findOne({ _id: id });
     if (!appt) throw new NotFoundException('Appointment not found.');
     if (appt.status === 'completed' || appt.status === 'cancelled') {
       throw new BadRequestException('This appointment is already closed.');
@@ -384,12 +368,10 @@ export class PosController {
   @ApiResponse({ status: 201, description: 'Paid.' })
   @Post('appointments/:id/pay')
   async payAppointment(
-    @CurrentPosUser() caller: PosUser,
     @Param('id') id: string,
     @Body() dto: PosPayDto,
   ): Promise<{ data: { ok: boolean }; message: string }> {
-    const salonId = caller.salonId;
-    const appt = await this.apptModel.findOne({ _id: id, salonId }).lean();
+    const appt = await this.apptModel.findOne({ _id: id }).lean();
     if (!appt) throw new NotFoundException('Appointment not found.');
     if (appt.status === 'completed') throw new BadRequestException('This appointment is already paid.');
     if (appt.status === 'cancelled') throw new BadRequestException('This appointment was cancelled.');
@@ -410,15 +392,12 @@ export class PosController {
       items.push({ kind: 'service', refId: id, name: 'Service', qty: 1, unitPrice: appt.price ?? 0 });
     }
 
-    await this.financeService.createPayment(
-      { salonId },
-      {
-        appointmentId: id,
-        stylistId: appt.stylistId.toString(),
-        items,
-        method: dto.method,
-      },
-    );
+    await this.financeService.createPayment({
+      appointmentId: id,
+      stylistId: appt.stylistId.toString(),
+      items,
+      method: dto.method,
+    });
 
     return { data: { ok: true }, message: 'Paid.' };
   }
@@ -448,10 +427,9 @@ export class PosController {
   @ApiResponse({ status: 201, description: 'Walk-in created.' })
   @Post('walkin')
   async createWalkin(
-    @CurrentPosUser() caller: PosUser,
     @Body() dto: CreateWalkinDto,
   ): Promise<{ data: AppointmentDocument; message: string }> {
-    const data = await this.bookingService.createWalkin({ salonId: caller.salonId }, dto);
+    const data = await this.bookingService.createWalkin(dto);
     return { data, message: 'Walk-in created.' };
   }
 

@@ -12,9 +12,10 @@ import { Product, ProductDocument } from '../stock/schemas/product.schema';
 import { StockMove, StockMoveDocument } from '../stock/schemas/stock-move.schema';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SOCKET_EVENTS } from '../common/socket-events';
-import { SalonScope } from '../common/scope/salon-scope';
 import { AuthUser } from '../common/decorators/current-user.decorator';
 import { BestSellersQueryDto, CreateSaleDto, SalesQueryDto } from './dto/create-sale.dto';
+import { startOfDayInTz, endOfDayInTz, isoDateInTz, shiftIsoDate } from '../common/time/tz-day.util';
+import { getTenantContext } from '../common/tenant/tenant-context';
 
 export interface BestSeller {
   refId: string;
@@ -36,13 +37,12 @@ export class SalesService {
   ) {}
 
   private periodRange(period: 'day' | 'week' | 'month', ref = new Date()): { from: Date; to: Date } {
-    const to = new Date(ref);
-    const from = new Date(ref);
-    from.setUTCHours(0, 0, 0, 0);
-    to.setUTCHours(23, 59, 59, 999);
-    if (period === 'week') from.setUTCDate(from.getUTCDate() - 6);
-    if (period === 'month') from.setUTCDate(1);
-    return { from, to };
+    const refDay = isoDateInTz(ref);
+    const to = endOfDayInTz(refDay);
+    let fromDay = refDay;
+    if (period === 'week') fromDay = shiftIsoDate(refDay, -6);
+    if (period === 'month') fromDay = `${refDay.slice(0, 7)}-01`;
+    return { from: startOfDayInTz(fromDay), to };
   }
 
   private buildDateFilter(q: SalesQueryDto): { from: Date; to: Date } {
@@ -62,7 +62,7 @@ export class SalesService {
 
   // ─── Création vente retail POS ────────────────────────────────────────────
 
-  async create(scope: SalonScope, dto: CreateSaleDto, user: AuthUser): Promise<SaleDocument> {
+  async create(dto: CreateSaleDto, user: AuthUser): Promise<SaleDocument> {
     const session = await this.connection.startSession();
     let created: SaleDocument | null = null;
     let productIds: string[] = [];
@@ -75,13 +75,13 @@ export class SalesService {
 
       for (const item of dto.items) {
         const res = await this.productModel.updateOne(
-          { _id: item.refId, salonId: scope.salonId, stock: { $gte: item.qty } },
+          { _id: item.refId, stock: { $gte: item.qty } },
           { $inc: { stock: -item.qty, salesCount: item.qty } },
           session ? { session } : {},
         );
 
         if (res.modifiedCount === 0) {
-          const p = await this.productModel.findOne({ _id: item.refId, salonId: scope.salonId }).session(session ?? null);
+          const p = await this.productModel.findOne({ _id: item.refId }).session(session ?? null);
           const name = p?.name ?? item.refId;
           throw new ConflictException(`Stock insuffisant: ${name}`);
         }
@@ -99,7 +99,6 @@ export class SalesService {
         await this.moveModel.create(
           [
             {
-              salonId: scope.salonId,
               productId: new Types.ObjectId(item.refId),
               type: 'out',
               qty: item.qty,
@@ -125,7 +124,6 @@ export class SalesService {
       const [sale] = await this.saleModel.create(
         [
           {
-            salonId: scope.salonId,
             source: 'pos',
             items: resolvedItems,
             subtotal,
@@ -163,8 +161,9 @@ export class SalesService {
 
     // Post-commit : notifs persist-then-emit
     const sale = created!;
+    const salonId = getTenantContext().tenantId;
     void this.notifications.dispatch({
-      salonId: scope.salonId,
+      salonId,
       role: 'manager',
       type: SOCKET_EVENTS.SALE_RECORDED,
       payload: {
@@ -179,14 +178,14 @@ export class SalesService {
       if (!p) continue;
       if (p.stock === 0) {
         void this.notifications.dispatch({
-          salonId: scope.salonId,
+          salonId,
           role: 'manager',
           type: SOCKET_EVENTS.STOCK_OUT,
           payload: { productId: id, name: p.name },
         });
       } else if (p.stock <= p.lowStockAt) {
         void this.notifications.dispatch({
-          salonId: scope.salonId,
+          salonId,
           role: 'manager',
           type: SOCKET_EVENTS.STOCK_LOW,
           payload: { productId: id, name: p.name, stock: p.stock },
@@ -199,18 +198,17 @@ export class SalesService {
 
   // ─── Historique ──────────────────────────────────────────────────────────
 
-  async findAll(scope: SalonScope, q: SalesQueryDto): Promise<SaleDocument[]> {
+  async findAll(q: SalesQueryDto): Promise<SaleDocument[]> {
     const { from, to } = this.buildDateFilter(q);
     return this.saleModel
-      .find({ salonId: scope.salonId, source: 'pos', voided: { $ne: true }, date: { $gte: from, $lte: to } })
+      .find({ source: 'pos', voided: { $ne: true }, date: { $gte: from, $lte: to } })
       .sort({ date: -1 });
   }
 
-  async findMine(user: AuthUser, scope: SalonScope, q: SalesQueryDto): Promise<SaleDocument[]> {
+  async findMine(user: AuthUser, q: SalesQueryDto): Promise<SaleDocument[]> {
     const { from, to } = this.buildDateFilter(q);
     return this.saleModel
       .find({
-        salonId: scope.salonId,
         source: 'pos',
         stylistId: new Types.ObjectId(user.staffId ?? user.sub),
         voided: { $ne: true },
@@ -219,8 +217,8 @@ export class SalesService {
       .sort({ date: -1 });
   }
 
-  async findOne(id: string, user: AuthUser, scope: SalonScope): Promise<SaleDocument> {
-    const sale = await this.saleModel.findOne({ _id: id, salonId: scope.salonId, source: 'pos' });
+  async findOne(id: string, user: AuthUser): Promise<SaleDocument> {
+    const sale = await this.saleModel.findOne({ _id: id, source: 'pos' });
     if (!sale) throw new NotFoundException('Vente introuvable.');
     if (user.role === 'stylist' && sale.stylistId?.toString() !== (user.staffId ?? user.sub)) {
       throw new ForbiddenException('Accès refusé.');
@@ -230,14 +228,13 @@ export class SalesService {
 
   // ─── Best-sellers ─────────────────────────────────────────────────────────
 
-  async bestSellers(scope: SalonScope, q: BestSellersQueryDto): Promise<BestSeller[]> {
+  async bestSellers(q: BestSellersQueryDto): Promise<BestSeller[]> {
     const { from, to } = this.periodRange(q.period ?? 'month');
     const limit = q.limit ?? 10;
 
     return this.saleModel.aggregate<BestSeller>([
       {
         $match: {
-          salonId: scope.salonId,
           source: 'pos',
           voided: { $ne: true },
           date: { $gte: from, $lte: to },
@@ -260,8 +257,8 @@ export class SalesService {
 
   // ─── Void (owner-only #8) ─────────────────────────────────────────────────
 
-  async voidSale(id: string, restock: boolean, user: AuthUser, scope: SalonScope): Promise<SaleDocument> {
-    const sale = await this.saleModel.findOne({ _id: id, salonId: scope.salonId, source: 'pos' });
+  async voidSale(id: string, restock: boolean, user: AuthUser): Promise<SaleDocument> {
+    const sale = await this.saleModel.findOne({ _id: id, source: 'pos' });
     if (!sale) throw new NotFoundException('Vente introuvable.');
     if (sale.voided) throw new ConflictException('Vente déjà annulée.');
 
@@ -279,14 +276,13 @@ export class SalesService {
       await session.withTransaction(async () => {
         for (const item of sale.items) {
           await this.productModel.updateOne(
-            { _id: item.refId, salonId: scope.salonId },
+            { _id: item.refId },
             { $inc: { stock: item.qty, salesCount: -item.qty } },
             { session },
           );
           await this.moveModel.create(
             [
               {
-                salonId: scope.salonId,
                 productId: new Types.ObjectId(item.refId),
                 type: 'in',
                 qty: item.qty,
@@ -309,7 +305,7 @@ export class SalesService {
         this.logger.warn('Transactions non supportées — restock non-atomique (fallback).');
         for (const item of sale.items) {
           await this.productModel.updateOne(
-            { _id: item.refId, salonId: scope.salonId },
+            { _id: item.refId },
             { $inc: { stock: item.qty, salesCount: -item.qty } },
           );
         }

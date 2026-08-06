@@ -24,8 +24,12 @@ import { SalonsModule } from './salons/salons.module';
 import { MarketplaceModule } from './marketplace/marketplace.module';
 import { LocationsModule } from './locations/locations.module';
 import { IdentityModule } from './identity/identity.module';
+import { InvitationModule } from './identity/invitation.module';
+import { DiscoveryModule } from './discovery/discovery.module';
 import { TenantModule } from './common/tenant/tenant.module';
 import { TenantContextMiddleware } from './common/tenant/tenant-context.middleware';
+import { EntitlementsModule } from './common/entitlements/entitlements.module';
+import { InternalModule } from './internal/internal.module';
 import { AppController } from './app.controller';
 
 @Module({
@@ -64,7 +68,11 @@ import { AppController } from './app.controller';
     MarketplaceModule,
     LocationsModule,
     IdentityModule,
+    InvitationModule,
+    DiscoveryModule,
     TenantModule,
+    EntitlementsModule,
+    InternalModule,
   ],
   controllers: [AppController],
 })

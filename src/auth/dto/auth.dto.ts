@@ -13,6 +13,7 @@ import {
   Min,
   MinLength,
 } from 'class-validator';
+import { StaffRole } from '../../team/schemas/staff.schema';
 
 const STAFF_ROLES = ['manager', 'stylist', 'colorist'] as const;
 const LEVELS = ['master', 'senior', 'apprentice'] as const;
@@ -56,6 +57,15 @@ export class RegisterDto {
   @MinLength(6)
   @MaxLength(128)
   password: string;
+
+  // Sprint 2 v2 Prompt 4 — utilisé seulement si le sous-domaine du Host ne résout rien
+  // (voir `extractTenantSlugFromHost` — no-op en dev/localhost). Remplace l'ancien fallback
+  // DEFAULT_SALON_ID : sans slug résolu (ni sous-domaine ni ce champ), 404 propre.
+  @IsOptional()
+  @IsString()
+  @MinLength(2)
+  @MaxLength(60)
+  salonSlug?: string;
 }
 
 export class CreateStaffAuthDto {
@@ -160,6 +170,13 @@ export class UpdateMeDto {
   phone?: string;
 }
 
+export class UpdateExpoPushTokenDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(512)
+  expoPushToken?: string | null;
+}
+
 export class LoginPinDto {
   @IsString()
   @Length(24, 24)
@@ -171,8 +188,17 @@ export class LoginPinDto {
   pin: string;
 }
 
+export class SwitchTenantDto {
+  @IsString()
+  tenantId: string;
+}
+
 export interface PosTokenPayload {
   staffId: string;
   salonId: string;
   scope: 'pos';
+  // Ajouté pour combler un trou trouvé au Prompt 6b : sans ce champ, TenantContextMiddleware
+  // (qui lit `payload.role` indistinctement du type de token) résolvait `role: undefined`
+  // pour toute requête POS — TenantContext.role jamais fiable pour ce chemin.
+  role: StaffRole;
 }

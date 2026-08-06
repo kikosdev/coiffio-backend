@@ -6,17 +6,15 @@ import {
   Param,
   Patch,
   Post,
-  Req,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { Request } from 'express';
 import { SettingsService } from './settings.service';
 import { CreateRoleDto, UpdateRoleDto, UpdateSalonDto } from './dto/settings.dto';
 import { JwtGuard } from '../common/guards/jwt.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
-import { getSalonScope } from '../common/scope/salon-scope';
+import { Destructive } from '../common/decorators/destructive.decorator';
 
 /**
  * Sprint 10 — paramètres salon (config + rôles). Owner voit et modifie tout.
@@ -35,8 +33,8 @@ export class SettingsController {
   @ApiResponse({ status: 200, description: 'OK' })
   @Get('salon')
   @Roles('owner', 'manager')
-  async getSalon(@Req() req: Request) {
-    const data = await this.settings.getSalon(getSalonScope(req));
+  async getSalon() {
+    const data = await this.settings.getSalon();
     return { data, message: 'OK' };
   }
 
@@ -44,8 +42,8 @@ export class SettingsController {
   @ApiResponse({ status: 200, description: 'Paramètres enregistrés.' })
   @Patch('salon')
   @Roles('owner')
-  async updateSalon(@Req() req: Request, @Body() dto: UpdateSalonDto) {
-    const data = await this.settings.updateSalon(getSalonScope(req), dto);
+  async updateSalon(@Body() dto: UpdateSalonDto) {
+    const data = await this.settings.updateSalon(dto);
     return { data, message: 'Paramètres enregistrés.' };
   }
 
@@ -66,8 +64,8 @@ export class SettingsController {
   @ApiResponse({ status: 200, description: 'OK' })
   @Get('roles')
   @Roles('owner', 'manager')
-  async getRoles(@Req() req: Request) {
-    const data = await this.settings.getRoles(getSalonScope(req));
+  async getRoles() {
+    const data = await this.settings.getRoles();
     return { data, message: 'OK' };
   }
 
@@ -75,8 +73,8 @@ export class SettingsController {
   @ApiResponse({ status: 201, description: 'Rôle créé.' })
   @Post('roles')
   @Roles('owner')
-  async createRole(@Req() req: Request, @Body() dto: CreateRoleDto) {
-    const data = await this.settings.createRole(getSalonScope(req), dto);
+  async createRole(@Body() dto: CreateRoleDto) {
+    const data = await this.settings.createRole(dto);
     return { data, message: 'Rôle créé.' };
   }
 
@@ -85,11 +83,10 @@ export class SettingsController {
   @Patch('roles/:id')
   @Roles('owner')
   async updateRole(
-    @Req() req: Request,
     @Param('id') id: string,
     @Body() dto: UpdateRoleDto,
   ) {
-    const data = await this.settings.updateRole(getSalonScope(req), id, dto);
+    const data = await this.settings.updateRole(id, dto);
     return { data, message: 'Rôle mis à jour.' };
   }
 
@@ -97,8 +94,9 @@ export class SettingsController {
   @ApiResponse({ status: 200, description: 'Rôle supprimé.' })
   @Delete('roles/:id')
   @Roles('owner')
-  async deleteRole(@Req() req: Request, @Param('id') id: string) {
-    await this.settings.deleteRole(getSalonScope(req), id);
+  @Destructive()
+  async deleteRole(@Param('id') id: string) {
+    await this.settings.deleteRole(id);
     return { data: null, message: 'Rôle supprimé.' };
   }
 }

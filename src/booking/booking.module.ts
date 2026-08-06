@@ -11,11 +11,15 @@ import { BookingService } from './booking.service';
 import { BookingController } from './booking.controller';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { IdentityModule } from '../identity/identity.module';
+import { LocationsModule } from '../locations/locations.module';
+import { TenantModule } from '../common/tenant/tenant.module';
 
 @Module({
   imports: [
     NotificationsModule,
     IdentityModule,
+    LocationsModule,
+    TenantModule,
     MongooseModule.forFeature([
       { name: Appointment.name, schema: AppointmentSchema },
       { name: Service.name, schema: ServiceSchema },

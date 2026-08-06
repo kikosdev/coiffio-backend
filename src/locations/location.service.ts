@@ -15,6 +15,18 @@ function toGeoPoint(address?: LocationAddressDto): LocationGeoPoint | undefined 
   return { type: 'Point', coordinates: [address.lng, address.lat] };
 }
 
+/**
+ * ⚠️ Exception délibérée au nettoyage Prompt 6b (retrait de `scope: SalonScope` des
+ * services) : CE service le garde. `TenantContextMiddleware` (tenant-context.middleware.ts)
+ * appelle `findAllForTenant`/`findPrimary` AVANT qu'un TenantContext n'existe — c'est
+ * littéralement ce qui sert à le construire (résolution de `locationId`/`locationIds`).
+ * `getTenantContext()` y throw systématiquement (chicken-and-egg structurel, pas un oubli).
+ * Les autres call sites (contrôleurs, BookingService, ClientProfileService via
+ * `runWithTenant(systemReadContext(tenantId), ...)`) ont tous un contexte déjà établi et
+ * pourraient s'en passer, mais un seul point d'entrée (le bootstrap) l'exige — donc
+ * `scope` reste le paramètre pour TOUT le service, plutôt que deux API différentes pour
+ * la même classe.
+ */
 @Injectable()
 export class LocationService {
   constructor(@InjectModel(Location.name) private readonly model: Model<LocationDocument>) {}

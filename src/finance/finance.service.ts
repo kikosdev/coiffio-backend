@@ -10,10 +10,11 @@ import { Product, ProductDocument } from '../stock/schemas/product.schema';
 import { StockMove, StockMoveDocument } from '../stock/schemas/stock-move.schema';
 import { Appointment, AppointmentDocument } from '../booking/schemas/appointment.schema';
 import { CreatePaymentDto, CreateExpenseDto, UpdateExpenseDto } from './dto/finance.dto';
-import { SalonScope } from '../common/scope/salon-scope';
 import { AuthUser } from '../common/decorators/current-user.decorator';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SOCKET_EVENTS } from '../common/socket-events';
+import { startOfDayInTz, endOfDayInTz, isoDateInTz, isoMonthInTz, shiftIsoDate } from '../common/time/tz-day.util';
+import { getTenantContext } from '../common/tenant/tenant-context';
 
 export type Period = 'day' | 'week' | 'month';
 export type EarningsPeriod = 'week' | 'month' | 'year';
@@ -48,31 +49,29 @@ export class FinanceService {
   }
 
   private periodRange(period: Period, ref = new Date()): { from: Date; to: Date } {
-    const to = new Date(ref);
-    const from = new Date(ref);
-    from.setUTCHours(0, 0, 0, 0);
-    to.setUTCHours(23, 59, 59, 999);
-    if (period === 'week') from.setUTCDate(from.getUTCDate() - 6);
-    if (period === 'month') from.setUTCDate(1);
-    return { from, to };
+    const refDay = isoDateInTz(ref);
+    const to = endOfDayInTz(refDay);
+    let fromDay = refDay;
+    if (period === 'week') fromDay = shiftIsoDate(refDay, -6);
+    if (period === 'month') fromDay = `${refDay.slice(0, 7)}-01`;
+    return { from: startOfDayInTz(fromDay), to };
   }
 
   // ─── Encaissement (décrément stock transactionnel #6 si lignes produit) ───────
 
-  async createPayment(scope: SalonScope, dto: CreatePaymentDto): Promise<PaymentDocument> {
-    const stylist = await this.staffModel.findOne({ _id: dto.stylistId, salonId: scope.salonId });
+  async createPayment(dto: CreatePaymentDto): Promise<PaymentDocument> {
+    const stylist = await this.staffModel.findOne({ _id: dto.stylistId });
     if (!stylist) throw new BadRequestException('Stylist not found.');
     const items = dto.items.map((i) => ({ ...i }));
     const amount = this.lineTotal(items);
     const tip = dto.tip ?? 0;
     const servicesTotal = this.lineTotal(items, 'service');
-    const profile = await this.profileModel.findOne({ salonId: scope.salonId, userId: stylist._id });
+    const profile = await this.profileModel.findOne({ userId: stylist._id });
     const commission = Math.round((servicesTotal * (profile?.commissionPct ?? 0)) / 100);
     const date = new Date();
     const productLines = items.filter((i) => i.kind === 'product' && i.refId);
 
     const buildPayment = {
-      salonId: scope.salonId,
       appointmentId: dto.appointmentId ? new Types.ObjectId(dto.appointmentId) : undefined,
       stylistId: stylist._id,
       items,
@@ -84,7 +83,6 @@ export class FinanceService {
       refunded: false,
     };
     const buildSale = (paymentId: Types.ObjectId) => ({
-      salonId: scope.salonId,
       source: 'pos' as const,
       items: items.map((i) => ({ refId: i.refId, name: i.name, qty: i.qty, unitPrice: i.unitPrice })),
       total: amount,
@@ -97,7 +95,7 @@ export class FinanceService {
     if (productLines.length === 0) {
       const payment = await this.paymentModel.create(buildPayment);
       await this.saleModel.create(buildSale(payment._id as Types.ObjectId));
-      if (dto.appointmentId) await this.markAppointmentCompleted(scope, dto.appointmentId);
+      if (dto.appointmentId) await this.markAppointmentCompleted(dto.appointmentId);
       return payment;
     }
 
@@ -106,16 +104,16 @@ export class FinanceService {
     try {
       let created: PaymentDocument | null = null;
       await session.withTransaction(async () => {
-        created = await this.checkoutWithStock(scope, session, buildPayment, buildSale, productLines, dto.stylistId);
+        created = await this.checkoutWithStock(session, buildPayment, buildSale, productLines, dto.stylistId);
       });
-      if (dto.appointmentId) await this.markAppointmentCompleted(scope, dto.appointmentId);
+      if (dto.appointmentId) await this.markAppointmentCompleted(dto.appointmentId);
       return created!;
     } catch (err) {
       if (err instanceof ConflictException) throw err;
       if (this.isTxnUnsupported(err)) {
         this.logger.warn('Transactions unsupported — fallback check+decrement (non-atomique).');
-        const created = await this.checkoutWithStock(scope, null, buildPayment, buildSale, productLines, dto.stylistId);
-        if (dto.appointmentId) await this.markAppointmentCompleted(scope, dto.appointmentId);
+        const created = await this.checkoutWithStock(null, buildPayment, buildSale, productLines, dto.stylistId);
+        if (dto.appointmentId) await this.markAppointmentCompleted(dto.appointmentId);
         return created;
       }
       throw err;
@@ -126,24 +124,24 @@ export class FinanceService {
 
   // Un encaissement lié à un RDV en clôt le cycle de vie — le paiement est la seule
   // confirmation métier que le service a été rendu (aucune autre action ne le fait).
-  private async markAppointmentCompleted(scope: SalonScope, appointmentId: string): Promise<void> {
+  private async markAppointmentCompleted(appointmentId: string): Promise<void> {
     await this.appointmentModel.updateOne(
-      { _id: appointmentId, salonId: scope.salonId, status: { $ne: 'cancelled' } },
+      { _id: appointmentId, status: { $ne: 'cancelled' } },
       { status: 'completed' },
     );
   }
 
   private async checkoutWithStock(
-    scope: SalonScope,
     session: ClientSession | null,
     buildPayment: Record<string, unknown>,
     buildSale: (paymentId: Types.ObjectId) => Record<string, unknown>,
     productLines: PaymentLine[],
     userId: string,
   ): Promise<PaymentDocument> {
+    const salonId = getTenantContext().tenantId;
     for (const line of productLines) {
       const res = await this.productModel.updateOne(
-        { _id: line.refId, salonId: scope.salonId, stock: { $gte: line.qty } },
+        { _id: line.refId, stock: { $gte: line.qty } },
         { $inc: { stock: -line.qty } },
         session ? { session } : {},
       );
@@ -153,7 +151,6 @@ export class FinanceService {
       await this.moveModel.create(
         [
           {
-            salonId: scope.salonId,
             productId: new Types.ObjectId(line.refId),
             type: 'out',
             qty: line.qty,
@@ -168,7 +165,7 @@ export class FinanceService {
       const p = await this.productModel.findById(line.refId).session(session ?? null);
       if (p && p.stock <= p.lowStockAt) {
         void this.notifications.dispatch({
-          salonId: scope.salonId,
+          salonId,
           role: 'owner',
           type: SOCKET_EVENTS.STOCK_LOW,
           payload: { productId: p._id.toString(), name: p.name, stock: p.stock },
@@ -216,26 +213,25 @@ export class FinanceService {
   }
 
   private earningsRange(period: EarningsPeriod, ref = new Date()): { from: Date; to: Date } {
-    const to = new Date(ref);
-    to.setUTCHours(23, 59, 59, 999);
-    const from = new Date(ref);
-    from.setUTCHours(0, 0, 0, 0);
-    if (period === 'week') from.setUTCDate(from.getUTCDate() - 6);
-    if (period === 'month') from.setUTCDate(1);
-    if (period === 'year') { from.setUTCMonth(0, 1); }
-    return { from, to };
+    const refDay = isoDateInTz(ref);
+    const to = endOfDayInTz(refDay);
+    let fromDay = refDay;
+    if (period === 'week') fromDay = shiftIsoDate(refDay, -6);
+    if (period === 'month') fromDay = `${refDay.slice(0, 7)}-01`;
+    if (period === 'year') fromDay = `${refDay.slice(0, 4)}-01-01`;
+    return { from: startOfDayInTz(fromDay), to };
   }
 
   private bucketKey(period: EarningsPeriod, date: Date): string {
-    if (period === 'year') return date.toISOString().slice(0, 7); // 'YYYY-MM'
+    if (period === 'year') return isoMonthInTz(date); // 'YYYY-MM'
     if (period === 'month') {
-      const dayOfMonth = date.getUTCDate();
+      const dayOfMonth = Number(isoDateInTz(date).slice(8, 10));
       return `W${Math.ceil(dayOfMonth / 7)}`; // 'W1'..'W5'
     }
-    return date.toISOString().slice(0, 10); // 'YYYY-MM-DD'
+    return isoDateInTz(date); // 'YYYY-MM-DD'
   }
 
-  async myEarnings(scope: SalonScope, user: AuthUser, period: EarningsPeriod): Promise<{
+  async myEarnings(user: AuthUser, period: EarningsPeriod): Promise<{
     period: EarningsPeriod;
     totalTnd: number;
     changePct: number;
@@ -247,8 +243,8 @@ export class FinanceService {
     const stylistId = new Types.ObjectId(user.staffId ?? user.sub);
 
     const [payments, priorPayments] = await Promise.all([
-      this.paymentModel.find({ salonId: scope.salonId, stylistId, refunded: false, date: { $gte: range.from, $lte: range.to } }),
-      this.paymentModel.find({ salonId: scope.salonId, stylistId, refunded: false, date: { $gte: prior.from, $lte: prior.to } }),
+      this.paymentModel.find({ stylistId, refunded: false, date: { $gte: range.from, $lte: range.to } }),
+      this.paymentModel.find({ stylistId, refunded: false, date: { $gte: prior.from, $lte: prior.to } }),
     ]);
 
     const totalTnd = payments.reduce((a, p) => a + p.amount, 0);
@@ -281,22 +277,22 @@ export class FinanceService {
     return { period, totalTnd, changePct, byService, chartBars };
   }
 
-  async myCaisse(scope: SalonScope, user: AuthUser): Promise<{ payments: PaymentDocument[]; totals: CaisseTotals }> {
+  async myCaisse(user: AuthUser): Promise<{ payments: PaymentDocument[]; totals: CaisseTotals }> {
     const { from, to } = this.periodRange('day');
     const payments = await this.paymentModel
-      .find({ salonId: scope.salonId, stylistId: new Types.ObjectId(user.staffId ?? user.sub), date: { $gte: from, $lte: to } })
+      .find({ stylistId: new Types.ObjectId(user.staffId ?? user.sub), date: { $gte: from, $lte: to } })
       .sort({ date: -1 });
     return { payments, totals: this.totals(payments) };
   }
 
-  async overview(scope: SalonScope): Promise<{
+  async overview(): Promise<{
     totals: CaisseTotals;
     byStylist: { stylistId: string; name: string; gross: number; tips: number; commission: number }[];
     payments: PaymentDocument[];
   }> {
     const { from, to } = this.periodRange('day');
-    const payments = await this.paymentModel.find({ salonId: scope.salonId, date: { $gte: from, $lte: to } });
-    const stylists = await this.staffModel.find({ salonId: scope.salonId, role: { $in: ['owner', 'manager', 'stylist'] } });
+    const payments = await this.paymentModel.find({ date: { $gte: from, $lte: to } });
+    const stylists = await this.staffModel.find({ role: { $in: ['owner', 'manager', 'stylist'] } });
     const nameOf = new Map(stylists.map((s) => [s._id.toString(), s.name]));
     const groups = new Map<string, { gross: number; tips: number; commission: number }>();
     for (const p of payments.filter((x) => !x.refunded)) {
@@ -317,8 +313,8 @@ export class FinanceService {
 
   // ─── Refund owner-only (#8) ──────────────────────────────────────────────────
 
-  async refund(scope: SalonScope, user: AuthUser, id: string): Promise<PaymentDocument> {
-    const payment = await this.paymentModel.findOne({ _id: id, salonId: scope.salonId });
+  async refund(user: AuthUser, id: string): Promise<PaymentDocument> {
+    const payment = await this.paymentModel.findOne({ _id: id });
     if (!payment) throw new NotFoundException('Payment not found.');
     if (payment.refunded) throw new BadRequestException('Payment already refunded.');
     payment.refunded = true;
@@ -326,7 +322,6 @@ export class FinanceService {
     payment.refundedAt = new Date();
     await payment.save();
     await this.saleModel.create({
-      salonId: scope.salonId,
       source: 'pos',
       items: payment.items.map((i) => ({ refId: i.refId, name: i.name, qty: i.qty, unitPrice: -i.unitPrice })),
       total: -payment.amount,
@@ -339,13 +334,12 @@ export class FinanceService {
 
   // ─── Dépenses ────────────────────────────────────────────────────────────────
 
-  async listExpenses(scope: SalonScope): Promise<ExpenseDocument[]> {
-    return this.expenseModel.find({ salonId: scope.salonId }).sort({ date: -1 });
+  async listExpenses(): Promise<ExpenseDocument[]> {
+    return this.expenseModel.find({}).sort({ date: -1 });
   }
 
-  async createExpense(scope: SalonScope, user: AuthUser, dto: CreateExpenseDto): Promise<ExpenseDocument> {
+  async createExpense(user: AuthUser, dto: CreateExpenseDto): Promise<ExpenseDocument> {
     return this.expenseModel.create({
-      salonId: scope.salonId,
       category: dto.category,
       amount: dto.amount,
       date: dto.date ? new Date(`${dto.date}T00:00:00.000Z`) : new Date(),
@@ -354,8 +348,8 @@ export class FinanceService {
     });
   }
 
-  async updateExpense(scope: SalonScope, id: string, dto: UpdateExpenseDto): Promise<ExpenseDocument> {
-    const e = await this.expenseModel.findOne({ _id: id, salonId: scope.salonId });
+  async updateExpense(id: string, dto: UpdateExpenseDto): Promise<ExpenseDocument> {
+    const e = await this.expenseModel.findOne({ _id: id });
     if (!e) throw new NotFoundException('Expense not found.');
     if (dto.category !== undefined) e.category = dto.category;
     if (dto.amount !== undefined) e.amount = dto.amount;
@@ -365,15 +359,15 @@ export class FinanceService {
     return e;
   }
 
-  async deleteExpense(scope: SalonScope, id: string): Promise<{ id: string }> {
-    const e = await this.expenseModel.findOneAndDelete({ _id: id, salonId: scope.salonId });
+  async deleteExpense(id: string): Promise<{ id: string }> {
+    const e = await this.expenseModel.findOneAndDelete({ _id: id });
     if (!e) throw new NotFoundException('Expense not found.');
     return { id };
   }
 
   // ─── Rapports + CSV ────────────────────────────────────────────────────────────
 
-  async report(scope: SalonScope, period: Period): Promise<{
+  async report(period: Period): Promise<{
     period: Period;
     revenue: number;
     revenueChangePct: number;
@@ -384,23 +378,22 @@ export class FinanceService {
     byStylist: { stylistId: string; name: string; revenue: number }[];
   }> {
     const { from, to } = this.periodRange(period);
-    const sales = await this.saleModel.find({ salonId: scope.salonId, date: { $gte: from, $lte: to } });
+    const sales = await this.saleModel.find({ date: { $gte: from, $lte: to } });
     const payments = await this.paymentModel.find({
-      salonId: scope.salonId,
       date: { $gte: from, $lte: to },
       refunded: false,
     });
-    const expenses = await this.expenseModel.find({ salonId: scope.salonId, date: { $gte: from, $lte: to } });
+    const expenses = await this.expenseModel.find({ date: { $gte: from, $lte: to } });
     const revenue = sales.reduce((a, s) => a + s.total, 0);
     const tips = payments.reduce((a, p) => a + p.tip, 0);
     const exp = expenses.reduce((a, e) => a + e.amount, 0);
 
     const prior = this.priorRange({ from, to });
-    const priorSales = await this.saleModel.find({ salonId: scope.salonId, date: { $gte: prior.from, $lte: prior.to } });
+    const priorSales = await this.saleModel.find({ date: { $gte: prior.from, $lte: prior.to } });
     const priorRevenue = priorSales.reduce((a, s) => a + s.total, 0);
     const revenueChangePct = priorRevenue === 0 ? (revenue > 0 ? 100 : 0) : Math.round(((revenue - priorRevenue) / priorRevenue) * 100);
 
-    const stylists = await this.staffModel.find({ salonId: scope.salonId, role: { $in: ['owner', 'manager', 'stylist', 'colorist'] } });
+    const stylists = await this.staffModel.find({ role: { $in: ['owner', 'manager', 'stylist', 'colorist'] } });
     const nameOf = new Map(stylists.map((s) => [s._id.toString(), s.name]));
     const revByStylist = new Map<string, number>();
     for (const s of sales) {
@@ -415,9 +408,9 @@ export class FinanceService {
     return { period, revenue, revenueChangePct, tips, expenses: exp, net: revenue + tips - exp, salesCount: sales.length, byStylist };
   }
 
-  async exportCsv(scope: SalonScope, period: Period): Promise<string> {
+  async exportCsv(period: Period): Promise<string> {
     const { from, to } = this.periodRange(period);
-    const sales = await this.saleModel.find({ salonId: scope.salonId, date: { $gte: from, $lte: to } }).sort({ date: 1 });
+    const sales = await this.saleModel.find({ date: { $gte: from, $lte: to } }).sort({ date: 1 });
     const rows: string[][] = [['date', 'source', 'total', 'stylistId', 'items']];
     for (const s of sales) {
       rows.push([
