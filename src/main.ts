@@ -19,6 +19,7 @@ async function bootstrap() {
   const allowedOrigins = [
     process.env.FRONTEND_ORIGIN,
     process.env.DESKTOP_ORIGIN,
+    process.env.BACKOFFICE_ORIGIN,
     ...(process.env.MOBILE_ORIGINS?.split(',').map((o) => o.trim()).filter(Boolean) ?? []),
   ].filter((o): o is string => !!o);
   app.enableCors({

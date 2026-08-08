@@ -15,7 +15,9 @@ import { dateAtMin, addDaysIso, todayIso } from '../booking/availability.util';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationDocument } from '../notifications/schemas/notification.schema';
 import { FinanceService } from '../finance/finance.service';
-import { PosPayDto } from './dto/team.dto';
+import { CaisseService } from '../finance/caisse.service';
+import { Salon, SalonDocument } from '../seed/schemas/salon.schema';
+import { PosPayDto, PosSaleDto } from './dto/team.dto';
 import { FeatureGuard } from '../common/entitlements/guards/feature.guard';
 import { RequiresFeature } from '../common/entitlements/decorators/requires-feature.decorator';
 
@@ -118,9 +120,11 @@ export class PosController {
     @InjectModel(Service.name) private readonly serviceModel: Model<ServiceDocument>,
     @InjectModel(Client.name) private readonly clientModel: Model<ClientDocument>,
     @InjectModel(Appointment.name) private readonly apptModel: Model<AppointmentDocument>,
+    @InjectModel(Salon.name) private readonly salonModel: Model<SalonDocument>,
     private readonly bookingService: BookingService,
     private readonly notificationsService: NotificationsService,
     private readonly financeService: FinanceService,
+    private readonly caisseService: CaisseService,
   ) { }
 
   @ApiOperation({ summary: 'Get the POS staff roster, on-shift status first' })
@@ -375,6 +379,7 @@ export class PosController {
     if (!appt) throw new NotFoundException('Appointment not found.');
     if (appt.status === 'completed') throw new BadRequestException('This appointment is already paid.');
     if (appt.status === 'cancelled') throw new BadRequestException('This appointment was cancelled.');
+    await this.caisseService.assertOpenForSale();
 
     const services = await this.serviceModel
       .find({ _id: { $in: appt.services } })
@@ -397,9 +402,48 @@ export class PosController {
       stylistId: appt.stylistId.toString(),
       items,
       method: dto.method,
+      received: dto.received,
     });
 
     return { data: { ok: true }, message: 'Paid.' };
+  }
+
+  /**
+   * Taxe + devise du salon, lisibles avec un token POS. `GET /settings/salon` est réservé
+   * owner·manager (`JwtGuard`+`RolesGuard`) — un opérateur connecté par PIN n'a pas de `role`
+   * et recevrait 403. Le POS a besoin de ces deux valeurs pour calculer un ticket, donc elles
+   * sont exposées ici, derrière `PosScopeGuard` (accepte les deux types de token).
+   */
+  @ApiOperation({ summary: 'Get the salon tax rate and currency for POS ticket maths' })
+  @ApiResponse({ status: 200, description: 'OK' })
+  @Get('config')
+  async getConfig(
+    @CurrentPosUser() caller: PosUser,
+  ): Promise<{ data: { taxRate: number; currency: string }; message: string }> {
+    const salon = await this.salonModel.findById(caller.salonId).select('taxRate currency').lean();
+    if (!salon) throw new NotFoundException('Salon not found.');
+    return { data: { taxRate: salon.taxRate ?? 0, currency: salon.currency ?? 'TND' }, message: 'OK' };
+  }
+
+  /**
+   * Encaissement d'un ticket composé au comptoir (walk-in, sans RDV). Délègue à
+   * `FinanceService.createPayment()` — même chemin que `payAppointment()` : Payment + Sale +
+   * commission + décrément stock transactionnel pour les lignes produit. La seule différence
+   * est l'absence d'`appointmentId` (rien à clore côté agenda).
+   */
+  @ApiOperation({ summary: 'Record a counter sale (walk-in ticket, no appointment)' })
+  @ApiResponse({ status: 201, description: 'Sale recorded.' })
+  @Post('sale')
+  async recordSale(@Body() dto: PosSaleDto): Promise<{ data: { ok: boolean; paymentId: string }; message: string }> {
+    await this.caisseService.assertOpenForSale();
+    const payment = await this.financeService.createPayment({
+      stylistId: dto.stylistId,
+      items: dto.items,
+      method: dto.method,
+      tip: dto.tip,
+      received: dto.received,
+    });
+    return { data: { ok: true, paymentId: (payment._id as Types.ObjectId).toString() }, message: 'Sale recorded.' };
   }
 
   @ApiOperation({ summary: 'Clock in the current POS staff member' })

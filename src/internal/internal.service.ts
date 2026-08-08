@@ -173,7 +173,15 @@ export class InternalService {
             { session },
           );
 
-          await this.scheduleModel.create([{ salonId: dto.tenantId, stylistId: owner._id, weekly: [], overrides: [] }], { session });
+          // `locationId` EXPLICITE : `schedules` est LOCATION_SCOPED, et le contexte de
+          // provisioning (`bootstrapCtx`) porte `locationId: ''`. Sans cette valeur, le plugin
+          // insère `locationId: ''`, et le premier enregistrement de rota par l'owner (session
+          // réelle, vrai locationId) ne retrouve plus ce document : le `findOneAndUpdate`
+          // upsert bascule en INSERT et viole l'index unique `salonId_1_stylistId_1` (E11000).
+          await this.scheduleModel.create(
+            [{ salonId: dto.tenantId, locationId, stylistId: owner._id, weekly: [], overrides: [] }],
+            { session },
+          );
 
           await this.serviceModel.create(
             DEFAULT_SERVICES.map((s) => ({ ...s, salonId: dto.tenantId })),

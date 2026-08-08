@@ -71,6 +71,11 @@ export class FinanceService {
     const date = new Date();
     const productLines = items.filter((i) => i.kind === 'product' && i.refId);
 
+    // Rendu de monnaie : archivé UNIQUEMENT si le client a réellement donné plus que le dû.
+    // Un `received` égal ou inférieur au total n'apprend rien et polluerait le journal.
+    const cashReceived =
+      dto.method === 'cash' && dto.received !== undefined && dto.received > amount + tip ? dto.received : undefined;
+
     const buildPayment = {
       appointmentId: dto.appointmentId ? new Types.ObjectId(dto.appointmentId) : undefined,
       stylistId: stylist._id,
@@ -79,6 +84,8 @@ export class FinanceService {
       tip,
       commission,
       method: dto.method,
+      cashReceived,
+      changeGiven: cashReceived === undefined ? undefined : Math.round((cashReceived - amount - tip) * 1000) / 1000,
       date,
       refunded: false,
     };

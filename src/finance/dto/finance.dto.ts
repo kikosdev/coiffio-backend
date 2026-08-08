@@ -17,6 +17,8 @@ export class CreatePaymentDto {
   @IsArray() @ArrayMinSize(1) @ValidateNested({ each: true }) @Type(() => PaymentLineDto) items: PaymentLineDto[];
   @IsOptional() @IsNumber() @Min(0) tip?: number;
   @IsIn(['cash', 'card']) method: 'cash' | 'card';
+  /** Espèces remises par le client — sert à archiver le rendu de monnaie. Ignoré en carte. */
+  @IsOptional() @IsNumber() @Min(0) received?: number;
 }
 
 export class CreateExpenseDto {

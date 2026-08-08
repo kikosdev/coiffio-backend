@@ -7,6 +7,7 @@ import { MembershipClaim } from '../common/decorators/current-user.decorator';
 const allowedOrigins = [
   process.env.FRONTEND_ORIGIN,
   process.env.DESKTOP_ORIGIN,
+  process.env.BACKOFFICE_ORIGIN,
   ...(process.env.MOBILE_ORIGINS?.split(',').map((origin) => origin.trim()).filter(Boolean) ?? []),
 ].filter((origin): origin is string => !!origin);
 

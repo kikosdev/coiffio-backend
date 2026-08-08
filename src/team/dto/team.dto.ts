@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
 import {
+  ArrayMinSize,
   IsArray,
   IsBoolean,
   IsHexColor,
@@ -138,6 +139,64 @@ export class UpdateStaffLocationsDto {
 export class PosPayDto {
   @IsIn(['cash', 'card'])
   method: 'cash' | 'card';
+
+  /** Espèces remises par le client — archive le rendu de monnaie. Ignoré en carte. */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  received?: number;
+}
+
+// ─── Vente POS libre (walk-in, sans rendez-vous) ─────────────────────────────
+
+class PosSaleLineDto {
+  @IsIn(['service', 'product'])
+  kind: 'service' | 'product';
+
+  @IsString()
+  refId: string;
+
+  @IsString()
+  @MaxLength(160)
+  name: string;
+
+  @IsInt()
+  @Min(1)
+  qty: number;
+
+  @IsNumber()
+  @Min(0)
+  unitPrice: number;
+}
+
+/**
+ * Encaissement POS sans rendez-vous préexistant. `PosPayDto` couvre le cas "un RDV du board
+ * est payé" (les lignes sont dérivées du RDV) ; celui-ci couvre le ticket composé à la main
+ * au comptoir, où l'opérateur choisit le barbier et les lignes.
+ */
+export class PosSaleDto {
+  @IsMongoId()
+  stylistId: string;
+
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
+  @Type(() => PosSaleLineDto)
+  items: PosSaleLineDto[];
+
+  @IsIn(['cash', 'card'])
+  method: 'cash' | 'card';
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  tip?: number;
+
+  /** Espèces remises par le client — archive le rendu de monnaie. Ignoré en carte. */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  received?: number;
 }
 
 // ─── Schedule (weekly rota + overrides) ──────────────────────────────────────

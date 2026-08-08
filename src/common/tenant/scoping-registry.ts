@@ -67,6 +67,11 @@ export const LOCATION_SCOPED = [
   'payments',
   'sales',
   'expenses',
+  // Caisse Journal : la caisse physique appartient à UN comptoir, pas au salon entier —
+  // deux locations ouvrent chacune leur session le même jour (d'où l'index unique
+  // {salonId, locationId, day} plutôt que {salonId, day}).
+  'cashsessions',
+  'cashmovements',
   'products',
   'stockmoves',
   'schedules',

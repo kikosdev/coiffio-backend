@@ -97,9 +97,13 @@ async function main() {
     let updated = 0;
 
     for (const { salonId, primaryLocationId } of eligible) {
+      // `locationId: ''` compte comme NON renseigné : le plugin de scoping l'écrit tel quel
+      // quand le contexte courant n'a pas de location (ex. `bootstrapCtx` du provisioning),
+      // et une chaîne vide ne matche AUCUN filtre de session réelle — même symptôme qu'un
+      // champ absent (upsert qui bascule en insert → E11000 sur l'index unique).
       const filter = {
         salonId,
-        $or: [{ locationId: { $exists: false } }, { locationId: null }],
+        $or: [{ locationId: { $exists: false } }, { locationId: null }, { locationId: '' }],
       };
       const count = await coll.countDocuments(filter);
       missingBefore += count;

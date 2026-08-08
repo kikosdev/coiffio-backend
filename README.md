@@ -35,11 +35,12 @@ JWT_EXPIRES=7d
 PORT=3000
 FRONTEND_ORIGIN=http://localhost:5173
 DESKTOP_ORIGIN=http://localhost:5174
+BACKOFFICE_ORIGIN=http://localhost:5175
 MOBILE_ORIGINS=exp://192.168.x.x:8081,coiffio://app
 PRIVACY_POLICY_URL=https://coiffio.com/privacy
 ```
 
-**Production (Render):** `FRONTEND_ORIGIN=https://coiffio-front.vercel.app` and `DESKTOP_ORIGIN=https://coiffio-desktop.vercel.app` — these must be set with NO trailing slash. Native/mobile REST and Socket.io calls with no `Origin` header are allowed; custom dev-client origins can be listed in `MOBILE_ORIGINS`.
+**Production (Render):** `FRONTEND_ORIGIN=https://coiffio-front.vercel.app` and `DESKTOP_ORIGIN=https://coiffio-desktop.vercel.app` (plus `BACKOFFICE_ORIGIN` for the back-office console) — these must be set with NO trailing slash. Native/mobile REST and Socket.io calls with no `Origin` header are allowed; custom dev-client origins can be listed in `MOBILE_ORIGINS`.
 
 ---
 

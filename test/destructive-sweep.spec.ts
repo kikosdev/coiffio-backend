@@ -3,7 +3,7 @@
  * impersonation (JWT→contexte→log) existait déjà, mais rien ne bloquait une action
  * destructrice faite SOUS impersonation avant `DestructiveGuard`. Ce fichier prouve :
  *   1. Le mécanisme générique du guard (metadata-driven, no-op par défaut).
- *   2. Les 15 routes marquées `@Destructive()` sur les 10 contrôleurs balayés → 403
+ *   2. Les 16 routes marquées `@Destructive()` sur les 11 contrôleurs balayés → 403
  *      IMPERSONATION_READONLY sous impersonation (guard global, bloque AVANT le handler —
  *      donc pas besoin de données réelles pour chaque route, un id factice suffit).
  *   3. Un usage normal (sans impersonation) sur une route `@Destructive()` n'est JAMAIS
@@ -74,7 +74,8 @@ describe('DP-SWEEP — @Destructive() guard', () => {
     });
   }
 
-  // Les 15 routes @Destructive() ajoutées par ce sweep, sur les 10 contrôleurs touchés.
+  // Les 15 routes @Destructive() ajoutées par ce sweep, sur les 10 contrôleurs touchés,
+  // plus la clôture de caisse (irréversible : elle fige l'écart archivé de la journée).
   // Le guard bloque AVANT le handler (APP_GUARD global, exécuté avant les @UseGuards()
   // par contrôleur/méthode) — un id factice suffit, aucune donnée réelle n'est requise
   // pour prouver le 403.
@@ -91,6 +92,7 @@ describe('DP-SWEEP — @Destructive() guard', () => {
     { label: 'invitation.controller: DELETE :id (revoke)', method: 'DELETE', path: `/invitations/${FAKE_ID}` },
     { label: 'finance.controller: POST payments/:id/refund (refund)', method: 'POST', path: `/payments/${FAKE_ID}/refund` },
     { label: 'finance.controller: DELETE expenses/:id (deleteExpense)', method: 'DELETE', path: `/expenses/${FAKE_ID}` },
+    { label: 'caisse.controller: POST session/close (close)', method: 'POST', path: `/caisse/session/close`, body: { countedTotal: 0 } },
     { label: 'booking.controller: PATCH :salonSlug/appointments/:id/cancel (cancel)', method: 'PATCH', path: `/${'destructive-sweep-salon'}/appointments/${FAKE_ID}/cancel`, body: {} },
     { label: 'auth.controller: PATCH me/password (changePassword)', method: 'PATCH', path: `/auth/me/password`, body: { currentPassword: 'x', newPassword: 'y-12345678' } },
     { label: 'auth.controller: PATCH me/deactivate (deactivateMe)', method: 'PATCH', path: `/auth/me/deactivate` },

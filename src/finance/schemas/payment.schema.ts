@@ -56,6 +56,16 @@ export class Payment {
   @Prop({ type: String, enum: ['cash', 'card'], default: 'cash' })
   method: PaymentMethod;
 
+  /** Espèces remises par le client (rendu de monnaie du POS). Absent sur un paiement carte
+   *  et sur les encaissements antérieurs à cette fonctionnalité. */
+  @Prop({ min: 0 })
+  cashReceived?: number;
+
+  /** Monnaie rendue = `cashReceived − amount`. Stocké plutôt que recalculé : c'est ce qui a
+   *  RÉELLEMENT quitté le tiroir, et le montant du ticket peut être corrigé après coup. */
+  @Prop({ min: 0 })
+  changeGiven?: number;
+
   @Prop({ required: true, index: true })
   date: Date;
 
