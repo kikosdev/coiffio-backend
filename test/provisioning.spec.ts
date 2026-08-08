@@ -113,7 +113,12 @@ describe('provisioning (Prompt 8)', () => {
       owner: { name: 'Colliding Owner', email: existingEmail, phone: '+21620000099', password: 'password123' },
     };
     const res = await internalPost('/internal/tenants', dto);
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    // [P1 owner multi-salon] Assert EXACT — cet assert était `>= 400`, ce qui masquait le
+    // fait que la collision remontait en 500 (message Mongo brut). Un 500 fait retenter le
+    // `dp-client` du CP 4 fois et compte pour son disjoncteur ; un 409 non.
+    expect(res.status).toBe(409);
+    expect(res.body.statusCode).toBe(409);
+    expect(res.body.data?.code).toBe('OWNER_EMAIL_TAKEN');
 
     const [salon, location, staff, serviceCount] = await Promise.all([
       testDb.db.collection('salons').findOne({ _id: new ObjectId(failingTenantId) }),
@@ -128,6 +133,28 @@ describe('provisioning (Prompt 8)', () => {
 
     const usersWithEmail = await testDb.db.collection('users').countDocuments({ identifier: existingEmail });
     expect(usersWithEmail).toBe(1); // toujours le seul original, aucun doublon
+  });
+
+  // [P1 owner multi-salon] Sélectivité du mapping : la conversion E11000 → 409 ne vaut QUE
+  // pour `users.identifier`. Un slug déjà pris est une autre collision d'unicité, avec son
+  // propre sens — elle ne doit surtout pas être maquillée en OWNER_EMAIL_TAKEN. On n'assert
+  // PAS son code de statut exact (le mapper serait un choix de conception à part entière,
+  // hors périmètre de ce prompt) — seulement qu'elle n'usurpe pas l'identité du cas email.
+  it('une collision sur un AUTRE index unique (slug de salon) n\'est jamais mappée en OWNER_EMAIL_TAKEN', async () => {
+    const dto = {
+      tenantId: new ObjectId().toString(),
+      slug: 'prov-suite-1', // déjà pris par le premier test de cette suite
+      name: 'Slug Collision',
+      owner: { name: 'Fresh Owner', email: 'fresh-owner@prov-suite.test', phone: '+21620000098', password: 'password123' },
+    };
+    const res = await internalPost('/internal/tenants', dto);
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.body.data?.code).not.toBe('OWNER_EMAIL_TAKEN');
+
+    // L'email de cet owner était neuf : la transaction ayant échoué sur le slug, aucun user
+    // ne doit avoir été créé (confirme au passage que l'échec vient bien du slug, pas d'ailleurs).
+    const freshUser = await testDb.db.collection('users').findOne({ identifier: 'fresh-owner@prov-suite.test' });
+    expect(freshUser).toBeNull();
   });
 
   it('invalid HMAC signature → 401, and creates nothing', async () => {

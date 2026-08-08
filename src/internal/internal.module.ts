@@ -8,6 +8,7 @@ import { Schedule, ScheduleSchema } from '../team/schemas/schedule.schema';
 import { Service, ServiceSchema } from '../services/schemas/service.schema';
 import { Appointment, AppointmentSchema } from '../booking/schemas/appointment.schema';
 import { InternalController } from './internal.controller';
+import { OwnersController } from './owners.controller';
 import { InternalService } from './internal.service';
 import { IdentityModule } from '../identity/identity.module';
 import { EmailModule } from '../email/email.module';
@@ -26,7 +27,7 @@ import { EmailModule } from '../email/email.module';
     IdentityModule,
     EmailModule,
   ],
-  controllers: [InternalController],
+  controllers: [InternalController, OwnersController],
   providers: [InternalService],
 })
 export class InternalModule {}

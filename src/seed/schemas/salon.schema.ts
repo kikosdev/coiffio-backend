@@ -79,6 +79,22 @@ export const SalonGeoPointSchema = SchemaFactory.createForClass(SalonGeoPoint);
 export class Salon {
   @Prop({ required: true }) name: string;
   @Prop({ trim: true, lowercase: true }) slug: string;
+
+  /**
+   * [P4 owner multi-salon] Libellé d'emplacement — PUREMENT D'AFFICHAGE. Sert à distinguer
+   * deux tenants portant le même `name` ("Joshef Coif — Ezzahra" vs "Joshef Coif — Menzah 6"),
+   * cas rendu courant par le rattachement d'un 2e salon à un owner existant (P3).
+   *
+   * ⚠️ ORTHOGONAL à `locationId`/`locations` (Sprint 1), à ne surtout pas confondre :
+   *   - `locationId`     = 1 tenant → N sites. Intra-tenant, mêmes données sous-découpées.
+   *   - `locationLabel`  = 1 owner → N tenants. Inter-tenant, données ISOLÉES.
+   * Ce n'est donc ni `Location.name` (posé en dur à 'Principal' au provisioning) ni
+   * `Location.region` (groupement géographique consommé par la découverte cross-tenant).
+   *
+   * Aucune logique métier n'en dépend : pas d'unicité, pas de scope, pas de validation
+   * métier, aucun index. `slug` reste le seul champ unique du tenant.
+   */
+  @Prop({ type: String, trim: true }) locationLabel?: string;
   @Prop({ default: '' }) address: string;
   @Prop({ default: '' }) phone: string;
   @Prop({ default: '' }) email: string;
