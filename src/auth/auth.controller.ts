@@ -80,10 +80,19 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<{ data: { token: string; user: PublicUser }; message: string }> {
-    // Sprint 2 v2 Prompt 4 : sous-domaine du Host en priorité (no-op sûr en dev/localhost,
-    // voir `extractTenantSlugFromHost`), sinon le slug explicite du body — jamais de
-    // fallback silencieux ensuite, `resolveSalonId()` 404 si aucun des deux ne résout.
-    const salonSlug = extractTenantSlugFromHost(req.hostname) ?? dto.salonSlug;
+    /**
+     * Priorité INVERSÉE (le body d'abord, le Host en repli) par rapport à l'intention d'origine
+     * du Prompt 4. Raison mesurée : `extractTenantSlugFromHost` n'est un no-op que sur un
+     * domaine à ≤2 labels. En prod le Host est `coif-backend.onrender.com` (3 labels) → il en
+     * extrait `"coif-backend"`, et comme `??` ne retombe que sur `undefined`, ce faux slug
+     * écrasait un `dto.salonSlug` pourtant valide → 404 "Salon not found." pour TOUT appelant,
+     * y compris ceux qui envoyaient le bon slug. Invisible en local (`localhost` → undefined).
+     *
+     * Un slug explicite est une intention de l'appelant ; un slug déduit de l'infrastructure
+     * d'hébergement est une supposition. L'explicite gagne. Le Host reste utile le jour où un
+     * vrai sous-domaine par salon existe (`alpha.salonos.com`) et que le body n'en porte pas.
+     */
+    const salonSlug = dto.salonSlug ?? extractTenantSlugFromHost(req.hostname);
     const result = await this.auth.register(dto, salonSlug);
     this.setAuthCookie(res, result.token);
     return { data: result, message: 'Account created successfully.' };
