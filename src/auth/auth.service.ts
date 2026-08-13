@@ -23,6 +23,8 @@ import { AuthTokenPayload, AuthUser, MembershipClaim, Role } from '../common/dec
 import { normalizeIdentifier } from './identifier.util';
 import { runWithTenant, TenantContext } from '../common/tenant/tenant-context';
 import { LocationService } from '../locations/location.service';
+import { OpeningHoursEntry } from '../locations/schemas/location.schema';
+import { WeeklyShift } from '../team/schemas/staff.schema';
 import { EmailService } from '../email/email.service';
 import { passwordResetEmailHtml } from '../email/templates';
 import { RESET_PURPOSE, ResetPayload, mintResetToken, resetPasswordLink } from './reset-token.util';
@@ -40,6 +42,27 @@ import {
 
 const BCRYPT_ROUNDS = 10;
 const RESET_TOKEN_TTL = '1h';
+
+/**
+ * Horaires d'ouverture d'un site → planning hebdo d'un staff.
+ *
+ * `Location.openingHours` est la source réelle des horaires (`Salon.businessHours` n'en est
+ * qu'une copie dérivée, cf. `internal.service.ts#toOpeningHours`). Les deux formats diffèrent
+ * sur trois points, d'où ce mapping explicite plutôt qu'un spread :
+ *   open → start · close → end · `closed: true` → AUCUN shift ce jour-là.
+ *
+ * Un jour fermé est EXCLU, il n'est pas transformé en shift vide : le moteur de disponibilité
+ * dérive les créneaux des shifts présents, donc un jour absent = salon fermé = pas de créneau,
+ * ce qui est exactement le sens voulu.
+ *
+ * `breaks: []` — une pause déjeuner n'est pas déductible des horaires d'ouverture, et
+ * l'inventer bloquerait de vrais créneaux. L'owner les ajoute ensuite s'il le souhaite.
+ */
+function weekFromOpeningHours(openingHours: OpeningHoursEntry[] | undefined): WeeklyShift[] {
+  return (openingHours ?? [])
+    .filter((h) => !h.closed && h.open && h.close)
+    .map((h) => ({ day: h.day, start: h.open, end: h.close, breaks: [] }));
+}
 
 /** E11000 — même forme de test que `booking.service.ts`/`caisse.service.ts`, pas une 3e variante. */
 function isDuplicateKeyError(err: unknown): boolean {
@@ -493,6 +516,18 @@ export class AuthService {
     const locationIds = salonLocations.map((l) => (l._id as Types.ObjectId).toString());
     const primaryLocation = salonLocations.find((l) => l.isPrimary) ?? salonLocations[0];
 
+    /**
+     * Planning hebdo hérité des horaires d'ouverture du site. Sans ça, `week: []` en dur
+     * rendait tout staff fraîchement créé MUET côté booking : le moteur ne dérive ses créneaux
+     * que des shifts, donc zéro shift = zéro créneau, en silence, jusqu'à une configuration
+     * manuelle que rien ne signalait. `locationIds` (corrigé juste au-dessus) était nécessaire
+     * mais pas suffisant — les deux manquaient.
+     *
+     * Multi-sites : on hérite de la location PRIMAIRE (à défaut la 1re active), cohérent avec
+     * `defaultLocationId` ci-dessous. Les horaires par site se règlent ensuite à la main.
+     */
+    const week = weekFromOpeningHours(primaryLocation?.openingHours);
+
     const staff = await this.staffModel.create({
       salonId,
       userId: userDoc._id,
@@ -502,7 +537,7 @@ export class AuthService {
       role: dto.role,
       color: dto.color ?? '#B89968',
       isActive: true,
-      week: [],
+      week,
       locationIds,
       defaultLocationId: primaryLocation ? (primaryLocation._id as Types.ObjectId).toString() : undefined,
     });
