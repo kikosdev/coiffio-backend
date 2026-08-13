@@ -8,7 +8,7 @@
 /** Lecture cross-tenant, UNIQUEMENT via DiscoveryService (Prompt 5, pas encore construit).
  *  N'est PAS un niveau de scope : une collection ici reste par ailleurs classée dans
  *  TENANT_SCOPED ou UNSCOPED ci-dessous — c'est juste une autorisation d'accès en plus. */
-export const PUBLIC_DISCOVERY = ['salons', 'locations', 'services', 'testimonials', 'staffs'] as const;
+export const PUBLIC_DISCOVERY = ['salons', 'locations', 'services', 'testimonials', 'staffs', 'staffprofiles'] as const;
 
 /**
  * Durcissement post-Sprint-1-v2 (trou trouvé au Prompt 6, fermé avant Sprint 2) : whitelist
@@ -98,12 +98,32 @@ export const UNSCOPED = ['salons'] as const;
  *     le schéma n'a qu'un nom complet.
  *   - staffs.avatar → n'existe pas sur ce schéma. Absent ; toujours `null` en sortie.
  */
+/**
+ * Élargi pour MarketplaceService (fix du 500 "No tenant context" sur `/services/*` et
+ * `/barbers/public`). Cette whitelist est appliquée comme un `.select()` FORCÉ : un champ
+ * absent ici est retiré du résultat en silence, même si le service l'a demandé — donc un
+ * champ manquant ne produit pas une erreur mais une valeur `undefined` plus loin. Chaque
+ * ajout ci-dessous est un champ que MarketplaceService lit réellement, et qui est DÉJÀ
+ * exposé publiquement par une route existante :
+ *   - `services.salonId` : clé de regroupement de `findOfferings` ; déjà renvoyé comme
+ *     `SalonOffering.salonId`. `services.gender` : déjà renvoyé par `/:slug/book/services`.
+ *   - `staffs.salonId` : déjà renvoyé comme `PublicBarber.salonId`. `staffs.acceptingBookings`
+ *     et `staffs.week` : lus par `computeStaffOnShiftToday()` pour dériver `isAvailable` —
+ *     `week` n'est jamais renvoyé brut, seul le booléen sort.
+ *   - `salons.address` : déjà renvoyé par `/public/salons`. `salons.businessHours` : lu par
+ *     `computeSalonIsOpen()`, seul le booléen `isOpen` sort.
+ *   - `staffprofiles` (nouvelle entrée, + ajout à PUBLIC_DISCOVERY) : `publicTitle`/
+ *     `seniorityTag` sont déjà publics via `getPublicTeam()`. `userId` stocke en réalité
+ *     Staff._id (cf. public.service.ts), déjà exposé comme `PublicBarber.staffId`.
+ * Rien de sensible n'est ajouté ici (jamais email/phone/taxRate/passwordHash).
+ */
 export const PUBLIC_DISCOVERY_FIELDS: Record<string, string[]> = {
-  salons: ['name', 'slug'],
+  salons: ['name', 'slug', 'address', 'businessHours'],
   locations: ['name', 'address', 'phone', 'openingHours', 'region'],
-  services: ['name', 'category', 'price', 'durationMin'],
+  services: ['name', 'category', 'price', 'durationMin', 'salonId', 'gender'],
   testimonials: ['quote', 'authorName', 'isApproved', 'order', 'createdAt'],
-  staffs: ['name', 'role', 'publicProfile'],
+  staffs: ['name', 'role', 'publicProfile', 'salonId', 'week', 'acceptingBookings'],
+  staffprofiles: ['userId', 'publicTitle', 'seniorityTag'],
 };
 
 const ALL_SCOPED_COLLECTIONS = new Set<string>([...GLOBAL, ...TENANT_SCOPED, ...LOCATION_SCOPED, ...UNSCOPED]);

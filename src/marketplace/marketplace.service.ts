@@ -6,6 +6,7 @@ import { Salon, SalonDocument } from '../seed/schemas/salon.schema';
 import { Staff, StaffDocument } from '../team/schemas/staff.schema';
 import { StaffProfile, StaffProfileDocument } from '../team/schemas/staff-profile.schema';
 import { computeSalonIsOpen, computeStaffOnShiftToday } from '../common/time/salon-clock';
+import { runAsDiscovery } from '../common/tenant/tenant-context';
 
 export interface CategoryChip {
   category: string;
@@ -44,6 +45,20 @@ export interface PublicBarber {
   initials: string;
 }
 
+/**
+ * Marketplace public cross-salon. Chaque méthode s'exécute sous `runAsDiscovery()` — même
+ * pattern que `DiscoveryService` (Prompt 5), pour la même raison : ces routes n'ont ni JWT ni
+ * `:salonSlug`, donc `TenantContextMiddleware` ne pose aucun contexte, et le plugin de scope
+ * throw sur toute lecture d'une collection TENANT_SCOPED → 500 systématique
+ * ("No tenant context available") sur les 4 routes de ce module.
+ *
+ * ⚠️ Exclure ces routes du `TenantContextMiddleware` NE corrige PAS le bug : le 500 vient de
+ * l'ABSENCE de contexte, pas de sa présence — une exclusion supplémentaire ne ferait que
+ * garantir l'absence. Il faut poser un contexte explicite, et `runAsDiscovery` est le seul qui
+ * autorise une lecture cross-tenant (aucun `tenantId` à injecter : c'est le principe même du
+ * parcours de découverte). `runOutsideTenant` serait un bypass total réservé aux scripts/cron,
+ * jamais à une route HTTP publique.
+ */
 @Injectable()
 export class MarketplaceService {
   constructor(
@@ -55,16 +70,19 @@ export class MarketplaceService {
 
   /** Browse : catégories réellement offertes (SD-1 — `category` est un champ libre, pas un enum). */
   async getCategories(): Promise<CategoryChip[]> {
-    const rows = await this.serviceModel.aggregate([
-      { $match: { active: true, isPublic: true, category: { $ne: '' } } },
-      { $group: { _id: '$category', serviceCount: { $sum: 1 } } },
-      { $sort: { _id: 1 } },
-    ]);
-    return rows.map((r) => ({ category: r._id, serviceCount: r.serviceCount }));
+    return runAsDiscovery(async () => {
+      const rows = await this.serviceModel.aggregate([
+        { $match: { active: true, isPublic: true, category: { $ne: '' } } },
+        { $group: { _id: '$category', serviceCount: { $sum: 1 } } },
+        { $sort: { _id: 1 } },
+      ]);
+      return rows.map((r) => ({ category: r._id, serviceCount: r.serviceCount }));
+    });
   }
 
   /** Search : recherche libre sur `name`, tous salons actifs/publics (A2 — jamais de prix ici). */
   async searchByName(q: string): Promise<ServiceHit[]> {
+    return runAsDiscovery(async () => {
     const services = await this.serviceModel
       .find({ active: true, isPublic: true, name: { $regex: q, $options: 'i' } })
       .select('name category durationMin gender')
@@ -89,6 +107,7 @@ export class MarketplaceService {
       }
     }
     return [...seen.values()];
+    });
   }
 
   /** Tier-2 : salons offering all selected categories/names, with their combined best price. */
@@ -122,6 +141,9 @@ export class MarketplaceService {
     ];
     const matchAll = filter.match !== 'any';
 
+    // Validation d'entrée volontairement HORS du contexte découverte : un 400 ne doit pas
+    // dépendre d'un accès base.
+    return runAsDiscovery(async () => {
     const services = await this.serviceModel
       .find({
         active: true,
@@ -183,10 +205,12 @@ export class MarketplaceService {
         coverImage: null, // pas de champ image sur Salon aujourd'hui
       };
     });
+    });
   }
 
   /** Tier-1 : barbers (availability only, A3 — jamais de note/reviews). */
   async listPublicBarbers(): Promise<PublicBarber[]> {
+    return runAsDiscovery(async () => {
     const staff = await this.staffModel
       .find({ role: { $in: ['stylist', 'colorist'] }, isActive: true, 'publicProfile.visible': true })
       .select('name salonId week publicProfile acceptingBookings')
@@ -217,6 +241,7 @@ export class MarketplaceService {
         isAvailable: computeStaffOnShiftToday(s) && s.acceptingBookings !== false,
         initials: s.name.split(' ').map((w) => w[0] ?? '').join('').slice(0, 2).toUpperCase(),
       };
+    });
     });
   }
 

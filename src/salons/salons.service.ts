@@ -23,6 +23,11 @@ const MAX_UNGEOCODED = 10;
 export class SalonsService {
   constructor(@InjectModel(Salon.name) private readonly salonModel: Model<SalonDocument>) {}
 
+  /**
+   * `status: 'active'` sur les DEUX requêtes — même raison que `PublicService.listAll()` :
+   * `GuestScopeService` ne résout un slug que si le salon est actif, donc un salon non actif
+   * remonté ici serait ouvrable mais pas réservable (404 sur tout le parcours booking).
+   */
   async findNearby(lat: number, lng: number, radiusKm: number): Promise<NearbySalon[]> {
     // Salons géolocalisés, triés par distance croissante (exclut ceux sans `location`).
     const geoSalons = await this.salonModel.aggregate([
@@ -32,7 +37,7 @@ export class SalonsService {
           distanceField: 'distanceMeters',
           maxDistance: radiusKm * 1000,
           spherical: true,
-          query: { location: { $exists: true } },
+          query: { location: { $exists: true }, status: 'active' },
         },
       },
       { $limit: MAX_RESULTS },
@@ -40,7 +45,7 @@ export class SalonsService {
 
     // Salons sans coords (échec backfill) — jamais renvoyés par $geoNear, listés en bas.
     const noGeoSalons = await this.salonModel
-      .find({ 'location.coordinates': { $exists: false } })
+      .find({ 'location.coordinates': { $exists: false }, status: 'active' })
       .limit(MAX_UNGEOCODED)
       .lean();
 

@@ -55,15 +55,17 @@ export class PublicService {
 
   /**
    * Discovery-only cross-salon list (SKILL_home_list_all_salons) — deliberately not tenant-
-   * scoped at all (cross-salon by design). No `isActive` field exists on Salon today, so
-   * every seeded salon is returned; add that filter once the field lands rather than
-   * fabricating it here. Superseded by DiscoveryService (Prompt 5) for new consumers, but
-   * left in place since removing it would be an API contract change (out of this prompt's
-   * scope).
+   * scoped at all (cross-salon by design). Superseded by DiscoveryService (Prompt 5) for new
+   * consumers, but left in place since removing it would be an API contract change.
+   *
+   * `status: 'active'` aligns this list with `GuestScopeService.run()`, which resolves a slug
+   * only when `status === 'active'`. Without it, this endpoint advertised salons whose every
+   * booking route then answered 404 — the client home listed a salon you could open but never
+   * book. (The `status` field landed at Prompt 8; the older comment here predated it.)
    */
   async listAll(): Promise<PublicSalonSummary[]> {
     const salons = await this.salonModel
-      .find({})
+      .find({ status: 'active' })
       .sort({ name: 1 })
       .limit(MAX_LIST_SALONS)
       .select('slug name address businessHours')

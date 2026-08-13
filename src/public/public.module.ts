@@ -8,9 +8,12 @@ import { Service, ServiceSchema } from '../services/schemas/service.schema';
 import { Staff, StaffSchema } from '../team/schemas/staff.schema';
 import { StaffProfile, StaffProfileSchema } from '../team/schemas/staff-profile.schema';
 import { Client, ClientSchema } from '../clients/schemas/client.schema';
+import { TenantModule } from '../common/tenant/tenant.module';
 
 @Module({
   imports: [
+    // GuestScopeService — pose le TenantContext manquant sur `:salonSlug/team` (voir controller).
+    TenantModule,
     MongooseModule.forFeature([
       { name: Testimonial.name, schema: TestimonialSchema },
       { name: Salon.name, schema: SalonSchema },
