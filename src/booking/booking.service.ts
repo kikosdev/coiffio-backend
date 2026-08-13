@@ -844,9 +844,12 @@ export class BookingService {
    * RDV dans 2 salons ne voyait jamais le second.
    */
   async listMine(user: AuthUser, scope: 'upcoming' | 'history'): Promise<Record<string, unknown>[]> {
+    // Un client sans Membership n'a ni `clientId` ni `salonId` résolus — l'ancien fallback
+    // `[user.salonId]` valait alors `['']` et renvoyait 0 résultat en silence. Le pivot est
+    // l'identité : `ClientProfile.tenantIds` couvre tous les salons où il a réservé.
     const tenantIds = user.clientId
       ? await this.clientProfiles.getTenantIdsForClient(user.salonId, user.clientId)
-      : [user.salonId];
+      : await this.clientProfiles.getTenantIdsForUser(user.sub);
 
     const perTenant = await mapWithConcurrencyLimit(tenantIds, MAX_CONCURRENT_TENANTS, async (tenantId) => {
       try {

@@ -4,6 +4,7 @@ import { FilterQuery, Model, Types } from 'mongoose';
 import { Client, ClientDocument, PreferredChannel } from './schemas/client.schema';
 import { CreateClientDto, UpdateClientDto } from './dto/client.dto';
 import { Appointment, AppointmentDocument } from '../booking/schemas/appointment.schema';
+import { Salon, SalonDocument } from '../seed/schemas/salon.schema';
 import { ClientProfileService } from '../identity/client-profile.service';
 import { getTenantContext } from '../common/tenant/tenant-context';
 
@@ -38,6 +39,18 @@ export interface ClientDetail extends ClientListItem {
 
 export interface LatestVisit {
   appointmentId: string;
+  /**
+   * Le salon de ce RDV. `salonSlug` est ce dont le client mobile a besoin : toutes les routes
+   * booking sont préfixées par `:salonSlug`, et la carte "LATEST VISIT" n'avait aucun moyen de
+   * le connaître — le tap "Book" partait donc sans contexte salon. `salonId` est ajouté par
+   * cohérence avec `/appointments/mine`, qui l'expose déjà.
+   *
+   * `salonSlug` est nullable et jamais fabriqué : `Salon.slug` est optionnel au schéma (index
+   * sparse), donc un salon sans slug renvoie `null` plutôt qu'une valeur devinée — le mobile
+   * traite un slug vide comme "contexte perdu" au lieu d'appeler `/undefined/...`.
+   */
+  salonId: string;
+  salonSlug: string | null;
   barber: {
     id: string | null;
     name: string;
@@ -58,6 +71,7 @@ export class ClientsService {
   constructor(
     @InjectModel(Client.name) private readonly model: Model<ClientDocument>,
     @InjectModel(Appointment.name) private readonly apptModel: Model<AppointmentDocument>,
+    @InjectModel(Salon.name) private readonly salonModel: Model<SalonDocument>,
     private readonly clientProfiles: ClientProfileService,
   ) {}
 
@@ -65,6 +79,36 @@ export class ClientsService {
    * Dernier RDV `completed` du client courant (SKILL_client_home_dynamic HOME.3).
    * Aucune fabrication de visite : `null` si le client n'a aucun historique.
    */
+  /**
+   * Variante par IDENTITÉ — le chemin du client mobile, qui n'a ni Membership ni tenant actif
+   * (donc pas de `user.clientId`). Cherche le dernier RDV `completed` sur TOUS les salons où
+   * ce compte a réservé, via `ClientProfile.tenantIds` : c'est le comportement correct pour un
+   * client multi-salons, là où `getLatestVisit(clientId)` ne voyait qu'un seul tenant.
+   */
+  async getLatestVisitForUser(userId: string): Promise<LatestVisit | null> {
+    const found = await this.clientProfiles.findLatestCompletedForUser(userId);
+    if (!found) return null;
+
+    const salon = await this.salonModel.findById(found.tenantId).select('slug').lean();
+    const appt = found.appt as any;
+    const staff = appt.stylistId as { _id: { toString(): string }; name: string } | null;
+
+    return {
+      appointmentId: appt._id.toString(),
+      salonId: found.tenantId,
+      salonSlug: salon?.slug ?? null,
+      barber: {
+        id: staff?._id?.toString() ?? null,
+        name: staff?.name ?? 'Barber',
+        avatar: null,
+        rating: null,
+        reviewCount: null,
+        isPro: false,
+      },
+      lastVisitAt: appt.start,
+    };
+  }
+
   async getLatestVisit(clientId: string): Promise<LatestVisit | null> {
     const appt: any = await this.apptModel
       // Appointment.clientId is genuinely stored as ObjectId but the schema doesn't get
@@ -77,9 +121,16 @@ export class ClientsService {
 
     if (!appt) return null;
 
+    // `appt.salonId` est une String brute (Invariant #1) — jamais wrappée en ObjectId ici,
+    // sinon `findById` ne matcherait rien et le slug repartirait silencieusement à null.
+    const salonId = String(appt.salonId);
+    const salon = await this.salonModel.findById(salonId).select('slug').lean();
+
     const staff = appt.stylistId as { _id: { toString(): string }; name: string } | null;
     return {
       appointmentId: appt._id.toString(),
+      salonId,
+      salonSlug: salon?.slug ?? null,
       barber: {
         id: staff?._id?.toString() ?? null,
         name: staff?.name ?? 'Barber',

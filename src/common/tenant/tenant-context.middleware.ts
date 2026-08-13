@@ -7,14 +7,21 @@ import { AuthUser, LegacyAuthPayload } from '../decorators/current-user.decorato
 import { extractToken } from '../guards/jwt.guard';
 import { Staff, StaffDocument } from '../../team/schemas/staff.schema';
 import { Salon, SalonDocument } from '../../seed/schemas/salon.schema';
+import { User, UserDocument } from '../../auth/schemas/user.schema';
 import { LocationService } from '../../locations/location.service';
 import { EntitlementsService } from '../entitlements/entitlements.service';
 import { MembershipService } from '../../identity/membership.service';
+import { MemoryCache } from '../utils/memory-cache.util';
 import { runWithTenant, TenantContext, TenantRole } from './tenant-context';
 import { TenantMisconfiguredException } from './tenant-misconfigured.exception';
 import { PosTokenPayload } from '../../auth/dto/auth.dto';
 
 const MUTATING_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'];
+
+/** Même TTL que `MembershipService.findByUserCached` — `users.role` change encore moins
+ *  souvent qu'un membership, donc 60s est au moins aussi sûr ici. */
+const ACCOUNT_ROLE_CACHE_TTL_MS = 60_000;
+const accountRoleCacheKey = (userId: string): string => `acct-role:${userId}`;
 
 /**
  * TenantContext middleware (Sprint 1 v2 Prompt 2 → Sprint 2 v2 Prompt 2).
@@ -60,14 +67,35 @@ const MUTATING_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'];
 export class TenantContextMiddleware implements NestMiddleware {
   private readonly logger = new Logger(TenantContextMiddleware.name);
 
+  /** Cache local au middleware (instance unique, comme MembershipService) — jamais un état
+   *  par requête. Clé `acct-role:{userId}`, distincte de `mbr:{userId}`. */
+  private readonly accountRoleCache = new MemoryCache();
+
   constructor(
     private readonly jwt: JwtService,
     @InjectModel(Staff.name) private readonly staffModel: Model<StaffDocument>,
     @InjectModel(Salon.name) private readonly salonModel: Model<SalonDocument>,
+    @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
     private readonly locations: LocationService,
     private readonly entitlements: EntitlementsService,
     private readonly memberships: MembershipService,
   ) {}
+
+  /**
+   * Type de COMPTE (`users.role`), à ne pas confondre avec le rôle DANS un tenant
+   * (`Membership.role`, résolu plus bas). C'est la seule source de vérité disponible AVANT
+   * toute résolution de tenant : `Membership.role` est circulaire ici — on cherche justement
+   * à savoir si ce compte a besoin d'un membership.
+   *
+   * `users` est GLOBAL (exempté du plugin de scope), donc cette lecture ne requiert aucun
+   * TenantContext — c'est ce qui la rend utilisable à cet endroit précis.
+   */
+  private async accountRole(userId: string): Promise<'owner' | 'staff' | 'client' | null> {
+    return this.accountRoleCache.getOrSet(accountRoleCacheKey(userId), ACCOUNT_ROLE_CACHE_TTL_MS, async () => {
+      const user = await this.userModel.findById(userId).select('role').lean();
+      return user?.role ?? null;
+    });
+  }
 
   async use(req: Request, res: Response, next: NextFunction): Promise<void> {
     const token = extractToken(req);
@@ -119,6 +147,27 @@ export class TenantContextMiddleware implements NestMiddleware {
     // environnement — no-op structurel, voir la docstring de la classe.
 
     if (!candidateTenantId) {
+      /**
+       * MODÈLE MÉTIER : un CLIENT n'appartient à aucun salon — il parcourt l'annuaire et
+       * réserve chez plusieurs salons. Il n'a donc, par conception, aucun Membership (celui-ci
+       * est le lien staff/owner ↔ salon). Exiger un tenant ici le rendait incapable de
+       * s'authentifier ; c'est ce qui avait motivé la création d'un faux `kind:'client'`
+       * (retiré, voir auth.service.ts#register).
+       *
+       * `users.role` — PAS `Membership.role`, qui serait circulaire à ce point (cf. accountRole).
+       *
+       * Aucune ouverture d'accès : on passe SANS TenantContext, donc toute lecture d'une
+       * collection TENANT_SCOPED continue de throw au niveau du plugin Mongoose, et RolesGuard
+       * refuse toujours les routes staff/owner. Les routes salon-scopées du client
+       * (`/:salonSlug/...`) posent leur propre contexte via GuestScopeService, depuis l'URL.
+       */
+      const role = await this.accountRole(userId);
+      if (role === 'client') {
+        req.user = { sub: userId, salonId: '', role: 'client', accountType: 'client' } as AuthUser;
+        next();
+        return;
+      }
+
       throw new HttpException(
         {
           code: 'TENANT_REQUIRED',

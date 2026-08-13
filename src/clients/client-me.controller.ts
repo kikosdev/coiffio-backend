@@ -23,11 +23,16 @@ export class ClientMeController {
 
   @ApiOperation({ summary: "Get the current client's most recent visit" })
   @ApiResponse({ status: 200, description: 'OK' })
+  /**
+   * Clefé sur `user.sub` (identité), plus sur `user.clientId` : un client n'a pas de Membership,
+   * donc pas de `clientId`/`salonId` résolus — et un client réserve chez plusieurs salons, donc
+   * "dernière visite" est une question cross-tenant, pas une question par-salon.
+   */
   @Get('latest-visit')
   async latestVisit(
     @CurrentUser() user: AuthUser,
   ): Promise<{ data: LatestVisit | null; message: string }> {
-    const data = await this.clients.getLatestVisit(user.clientId as string);
+    const data = await this.clients.getLatestVisitForUser(user.sub);
     return { data, message: 'OK' };
   }
 
@@ -40,7 +45,8 @@ export class ClientMeController {
   async history(
     @CurrentUser() user: AuthUser,
   ): Promise<{ data: GlobalHistoryEntry[]; message: string }> {
-    const data = await this.clientProfiles.getHistoryForClient(user.salonId, user.clientId as string);
+    // Idem : résolu depuis l'identité, jamais depuis un tenant actif (voir latest-visit).
+    const data = await this.clientProfiles.getHistoryForUser(user.sub);
     return { data, message: 'OK' };
   }
 }

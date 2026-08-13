@@ -20,6 +20,15 @@ export interface GlobalHistoryEntry {
   status: string;
 }
 
+/** Le type hydraté renvoyé par Mongoose, pas `AppointmentDocument` (qui n'est pas assignable
+ *  depuis lui — voir la note sur flatMap dans findLatestCompletedForUser). */
+type HydratedAppointment = NonNullable<Awaited<ReturnType<Model<AppointmentDocument>['findOne']>>>;
+
+export interface LatestCompletedHit {
+  tenantId: string;
+  appt: HydratedAppointment;
+}
+
 export interface GlobalHistoryQuery {
   limit?: number;
   before?: Date;
@@ -255,6 +264,84 @@ export class ClientProfileService {
     const tenantIds = new Set(profile?.tenantIds ?? []);
     tenantIds.add(tenantId);
     return [...tenantIds];
+  }
+
+  /**
+   * ── Entrées par IDENTITÉ (users._id) ────────────────────────────────────────────────────
+   * Un client n'a ni Membership ni tenant actif : `user.clientId`/`user.salonId` sont donc
+   * vides pour lui, et les variantes `*ForClient(tenantId, clientId)` ci-dessus ne peuvent pas
+   * servir. Le pivot correct est `clientprofiles.userId` (index sparse déjà en place), d'où
+   * découlent `tenantIds` — l'agrégation multi-salons que ce compte exige par nature.
+   * `clientprofiles` est GLOBAL (exempté du plugin de scope) : lisible sans TenantContext.
+   */
+  async findProfileByUserId(userId: string): Promise<ClientProfileDocument | null> {
+    return this.profileModel.findOne({ userId: new Types.ObjectId(userId) }).exec();
+  }
+
+  /** Tenants où ce compte a déjà réservé. Vide (jamais une erreur) s'il n'a encore rien fait. */
+  async getTenantIdsForUser(userId: string): Promise<string[]> {
+    const profile = await this.findProfileByUserId(userId);
+    return profile?.tenantIds ?? [];
+  }
+
+  async getHistoryForUser(userId: string, query: GlobalHistoryQuery = {}): Promise<GlobalHistoryEntry[]> {
+    const profile = await this.findProfileByUserId(userId);
+    if (!profile) return [];
+    return this.getGlobalHistory((profile._id as Types.ObjectId).toString(), query);
+  }
+
+  /**
+   * Dernier RDV `completed` du compte, TOUS TENANTS CONFONDUS — `GlobalHistoryEntry` ne porte
+   * pas le coiffeur, donc on renvoie le document brut + son tenant et l'appelant le projette.
+   * Même discipline de scope que `fetchLocationAppointments` : `appointments` est
+   * LOCATION_SCOPED, chaque lecture passe par un contexte portant locationId/locationIds réels.
+   */
+  async findLatestCompletedForUser(userId: string): Promise<LatestCompletedHit | null> {
+    const tenantIds = await this.getTenantIdsForUser(userId);
+    if (tenantIds.length === 0) return null;
+
+    const perTenant = await mapWithConcurrencyLimit(tenantIds, MAX_CONCURRENT_TENANTS, async (tenantId) => {
+      try {
+        const locations = await runWithTenant(systemReadContext(tenantId), () =>
+          this.locations.findAllForTenant({ salonId: tenantId }),
+        );
+        if (locations.length === 0) return null;
+        const locationIds = locations.map((l) => (l._id as Types.ObjectId).toString());
+
+        const clientIds = await runWithTenant(systemReadContext(tenantId), async () => {
+          const profile = await this.findProfileByUserId(userId);
+          if (!profile) return [];
+          const docs = await this.clientModel.find({ profileId: (profile._id as Types.ObjectId).toString() }).select('_id').exec();
+          return docs.map((d) => d._id as Types.ObjectId);
+        });
+        if (clientIds.length === 0) return null;
+
+        const perLocation = await Promise.all(
+          locationIds.map((locationId) =>
+            runWithTenant(systemReadContext(tenantId, locationId, locationIds), () =>
+              this.appointmentModel
+                .findOne({ clientId: { $in: clientIds }, status: 'completed' })
+                .sort({ start: -1 })
+                .populate('stylistId', 'name')
+                .exec(),
+            ),
+          ),
+        );
+        // `flatMap` plutôt qu'un `filter` + prédicat de type : le type hydraté que renvoie
+        // Mongoose n'est pas assignable à `AppointmentDocument` (il porte `__v` en plus), donc
+        // un prédicat `a is AppointmentDocument` ne compile pas. flatMap restreint sans mentir.
+        const found = perLocation.flatMap((a) => (a ? [a] : []));
+        const latest = found.sort((a, b) => b.start.getTime() - a.start.getTime())[0];
+        return latest ? { tenantId, appt: latest } : null;
+      } catch (err) {
+        this.logger.warn(`findLatestCompletedForUser: skipping tenant ${tenantId} — ${(err as Error).message}`);
+        return null;
+      }
+    });
+
+    return perTenant
+      .flatMap((r) => (r ? [r] : []))
+      .sort((a, b) => b.appt.start.getTime() - a.appt.start.getTime())[0] ?? null;
   }
 
   /** Résout profileId à partir d'un clientId connu dans un tenant donné, puis délègue.

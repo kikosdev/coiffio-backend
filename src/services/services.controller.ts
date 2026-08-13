@@ -30,10 +30,17 @@ import { Destructive } from '../common/decorators/destructive.decorator';
 export class ServicesController {
   constructor(private readonly services: ServicesService) {}
 
-  // Lecture : tout user authentifié (pas de @Roles ⇒ RolesGuard laisse passer).
+  /**
+   * Catalogue BACKOFFICE, scopé au salon du membership actif. `@Roles` explicite (au lieu de
+   * "tout user authentifié") parce qu'un CLIENT n'a pas de tenant actif : il tombait sur un 500
+   * du plugin de scope ("No tenant context available") au lieu d'un 403 propre. Aucune fuite
+   * dans les deux cas — le plugin bloque — mais l'erreur doit dire la vérité. Le catalogue
+   * public du client est `GET /:salonSlug/book/services`, jamais cette route.
+   */
   @ApiOperation({ summary: 'List services in the catalog for the current salon' })
   @ApiResponse({ status: 200, description: 'OK' })
   @Get()
+  @Roles('owner', 'manager', 'stylist', 'colorist')
   async list(
     @Query() query: ListServicesQueryDto,
   ): Promise<{ data: ServiceDocument[]; message: string }> {

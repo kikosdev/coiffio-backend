@@ -41,6 +41,11 @@ import {
 const BCRYPT_ROUNDS = 10;
 const RESET_TOKEN_TTL = '1h';
 
+/** E11000 — même forme de test que `booking.service.ts`/`caisse.service.ts`, pas une 3e variante. */
+function isDuplicateKeyError(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err && (err as { code?: number }).code === 11000;
+}
+
 export interface PublicUser {
   id: string;
   salonId: string;
@@ -134,6 +139,26 @@ export class AuthService {
       registered:  true,
       accountType: 'staff',
       staffId:     staff._id.toString(),
+    };
+  }
+
+  /**
+   * Client GLOBAL — inscrit sans salon, donc sans `Client` par-salon (créé à sa 1re
+   * réservation) et sans Membership. `salonId` et `clientId` sont volontairement vides : ce
+   * compte n'appartient à aucun tenant, et rien ne doit être fabriqué pour combler le trou.
+   * `name`/`phone` viennent du DTO d'inscription, seules valeurs réelles à ce stade.
+   */
+  private toPublicFromUser(user: UserDocument, name = '', phone = ''): PublicUser {
+    return {
+      id:          user._id.toString(),
+      salonId:     '',
+      name,
+      email:       user.identifierType === 'email' ? user.identifier : '',
+      phone,
+      role:        'client',
+      isActive:    user.isActive,
+      registered:  true,
+      accountType: 'client',
     };
   }
 
@@ -232,8 +257,21 @@ export class AuthService {
     const userId = (user._id as Types.ObjectId).toString();
     if (user.role === 'client') {
       const client = await this.connection.collection('clients').findOne<ClientLoginRow>({ userId: user._id });
-      if (!client) throw new UnauthorizedException('Client profile not found.');
-      return { token: await this.issueToken(userId), user: this.toPublicFromClient(user, client) };
+      if (client) {
+        return { token: await this.issueToken(userId), user: this.toPublicFromClient(user, client) };
+      }
+      /**
+       * Client GLOBAL : la fiche `Client` est PAR SALON et n'est créée qu'à la 1re réservation
+       * (merge-on-phone, `BookingService.resolveClient`). Un compte fraîchement inscrit sans
+       * salon n'en a donc aucune — refuser le login ici ("Client profile not found.") rendait
+       * l'inscription tenant-less inutilisable : compte créé, connexion impossible.
+       * Son identité vit dans `clientprofiles` (global), d'où viennent nom et téléphone.
+       */
+      const profile = await this.clientProfiles.findProfileByUserId(userId);
+      return {
+        token: await this.issueToken(userId),
+        user: this.toPublicFromUser(user, profile?.name ?? '', profile?.phone ?? ''),
+      };
     }
 
     const staff = await this.connection.collection('staffs').findOne<StaffLoginRow>({ userId: user._id });
@@ -338,7 +376,10 @@ export class AuthService {
   async register(dto: RegisterDto, candidateSlug?: string): Promise<{ token: string; user: PublicUser }> {
     const id = normalizeIdentifier(dto.identifier);
     const phone = normalizeIdentifier(dto.phone).value;
-    const salonId = await this.resolveSalonId(candidateSlug);
+    // Tenant OPTIONNEL : un client n'appartient à aucun salon (voir la docstring de la classe).
+    // Un slug fourni reste honoré — il rattache immédiatement un Client à ce salon, ce qui est
+    // le cas d'usage "je m'inscris pendant une réservation".
+    const salonId = candidateSlug ? await this.resolveSalonId(candidateSlug) : null;
 
     const existing = await this.userModel.findOne({ identifier: id.value });
     if (existing) throw new ConflictException('An account with this identifier already exists.');
@@ -352,6 +393,30 @@ export class AuthService {
       isActive: true,
     });
     const userId = (user._id as Types.ObjectId).toString();
+
+    // ── Inscription globale (sans salon) : identité + ClientProfile seulement ────────────
+    // Pas de `Client` (il est par-salon, créé à la 1re réservation par
+    // `BookingService.resolveClient` en merge-on-phone) et SURTOUT pas de Membership : le
+    // Membership est le lien staff/owner ↔ salon. Un `kind:'client'` était un contournement
+    // du middleware, retiré ici — le middleware route désormais sur `users.role`.
+    if (!salonId) {
+      try {
+        await this.clientProfiles.findOrCreateByPhone(phone, {
+          name: dto.name,
+          email: dto.email?.toLowerCase(),
+          userId,
+        });
+      } catch (err) {
+        // `clientprofiles.phone` est UNIQUE global : deux inscriptions concurrentes avec le
+        // même téléphone se croisent ici. Sans ce catch, E11000 sort en 500 brut
+        // (AllExceptionsFilter n'a pas de cas E11000) — un 409 explicite est la bonne réponse.
+        if (isDuplicateKeyError(err)) {
+          throw new ConflictException('This phone number is already linked to another account.');
+        }
+        throw err;
+      }
+      return { token: await this.issueToken(userId), user: this.toPublicFromUser(user, dto.name, phone) };
+    }
 
     const client = await runWithTenant(bootstrapCtx(salonId), async () => {
       let client = await this.clientModel.findOne({ salonId, phone });
@@ -378,21 +443,9 @@ export class AuthService {
       return client;
     });
 
-    const existingMembership = await this.memberships.findByUserAndTenant(userId, salonId);
-    if (!existingMembership) {
-      const tenantLocations = await runWithTenant(bootstrapCtx(salonId), () => this.locations.findAllForTenant({ salonId }));
-      const primary = tenantLocations.find((l) => l.isPrimary) ?? tenantLocations[0];
-      await this.memberships.create({
-        userId,
-        tenantId: salonId,
-        kind: 'client',
-        clientId: (client._id as Types.ObjectId).toString(),
-        role: 'client',
-        locationIds: tenantLocations.map((l) => (l._id as Types.ObjectId).toString()),
-        defaultLocationId: primary ? (primary._id as Types.ObjectId).toString() : undefined,
-      });
-    }
-
+    // PAS de Membership, même avec un salon : le Membership est le lien staff/owner ↔ salon.
+    // Un client réserve chez plusieurs salons et n'appartient à aucun ; son rattachement à un
+    // salon est porté par `Client.salonId` + `ClientProfile.tenantIds`, jamais par un membership.
     return { token: await this.issueToken(userId), user: this.toPublicFromClient(user, client) };
   }
 
@@ -473,6 +526,17 @@ export class AuthService {
     // signup). Un même compte peut être staff sur un tenant et client sur un autre ;
     // brancher sur `user.role` renverrait 401 pour la moitié de ces cas.
     if (auth.accountType === 'client') {
+      /**
+       * Client GLOBAL (aucun Membership, donc `auth.clientId` vide) : il n'y a pas de tenant
+       * actif sur cette requête, et `clients` est TENANT_SCOPED — l'interroger ici fait throw
+       * le plugin de scope (500 "No tenant context available"). Son identité se lit dans
+       * `clientprofiles`, qui est GLOBAL. Le garde-fou reste donc intact : on ne lit une
+       * collection scopée que quand un tenant a réellement été résolu.
+       */
+      if (!auth.clientId) {
+        const profile = await this.clientProfiles.findProfileByUserId(auth.sub);
+        return this.toPublicFromUser(user, profile?.name ?? '', profile?.phone ?? '');
+      }
       const client = await this.clientModel.findById(auth.clientId);
       if (!client) throw new UnauthorizedException('Client profile not found.');
       return this.toPublicFromClient(user, client);
