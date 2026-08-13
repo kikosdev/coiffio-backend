@@ -473,6 +473,26 @@ export class AuthService {
       isActive: true,
     });
 
+    /**
+     * Rattachement aux locations du salon, à la création — sans ça, `locationIds` prenait le
+     * défaut Mongoose `[]`, et le moteur de disponibilité EXCLUT un `[]` explicite :
+     * son filtre est `$or: [{locationIds: locationId}, {locationIds: {$exists: false}}]`
+     * (voir booking.service.ts) — `[]` ne satisfait ni l'un ni l'autre. Résultat : tout staff
+     * créé depuis le dashboard avait 0 créneau, en silence, alors que les staffs issus du seed
+     * (locationIds peuplé) fonctionnaient. Le `[]` explicite garde son sens "délibérément
+     * aucune location" quand un owner le pose lui-même via PATCH /team/:id/locations ; c'est
+     * seulement le DÉFAUT à la création qui était faux.
+     *
+     * Mono-salon (Option A) = une seule Location, mais on prend toutes les actives : c'est
+     * déjà correct en multi-sites, et ça évite un second bug le jour où un salon en ouvre une
+     * deuxième. Ids en String (Invariant #1), jamais d'ObjectId.
+     */
+    const salonLocations = await runWithTenant(bootstrapCtx(salonId), () =>
+      this.locations.findAllForTenant({ salonId }),
+    );
+    const locationIds = salonLocations.map((l) => (l._id as Types.ObjectId).toString());
+    const primaryLocation = salonLocations.find((l) => l.isPrimary) ?? salonLocations[0];
+
     const staff = await this.staffModel.create({
       salonId,
       userId: userDoc._id,
@@ -483,6 +503,8 @@ export class AuthService {
       color: dto.color ?? '#B89968',
       isActive: true,
       week: [],
+      locationIds,
+      defaultLocationId: primaryLocation ? (primaryLocation._id as Types.ObjectId).toString() : undefined,
     });
 
     await this.scheduleModel.updateOne(
