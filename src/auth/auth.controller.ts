@@ -94,10 +94,20 @@ export class AuthController {
   @Post('register/client')
   async registerClient(
     @Body() dto: RegisterDto,
-    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<{ data: { token: string; user: PublicUser }; message: string }> {
-    const salonSlug = extractTenantSlugFromHost(req.hostname) ?? dto.salonSlug;
+    /**
+     * Slug pris UNIQUEMENT dans le body — jamais depuis le Host, contrairement à `register()`
+     * ci-dessus. Cette route est celle de l'app mobile, où l'inscription est GLOBALE : le
+     * client n'appartient à aucun salon et n'a donc aucun sous-domaine.
+     *
+     * `extractTenantSlugFromHost` n'est un no-op que sur un domaine à ≤2 labels. En prod le
+     * Host est `coif-backend.onrender.com` (3 labels) → il en extrayait `"coif-backend"`,
+     * qui prenait le pas sur `dto.salonSlug` (le `??` ne retombe que sur `undefined`) →
+     * `resolveSalonId` 404 "Salon not found." sur CHAQUE inscription. Invisible en local,
+     * où `localhost` renvoie bien `undefined` — d'où un 201 en dev et un 404 en prod.
+     */
+    const salonSlug = dto.salonSlug;
     const result = await this.auth.register(dto, salonSlug);
     this.setAuthCookie(res, result.token);
     return { data: result, message: 'Account created successfully.' };
