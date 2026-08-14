@@ -2,7 +2,7 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { Notification, NotificationDocument } from './schemas/notification.schema';
-import { NotificationsGateway } from './notifications.gateway';
+import { NotificationsGateway, roleRoom } from './notifications.gateway';
 import { AuthUser } from '../common/decorators/current-user.decorator';
 import { User, UserDocument } from '../auth/schemas/user.schema';
 import { Staff, StaffDocument } from '../team/schemas/staff.schema';
@@ -79,7 +79,8 @@ export class NotificationsService {
       const id = input.staffId.toString();
       this.gateway.emitToRoom(`staff:${id}`, input.type, notif);
     }
-    if (input.role) this.gateway.emitToRoom(`role:${input.role}`, input.type, notif);
+    // `roleRoom()` partagé avec le join de la gateway — jamais un littéral reconstruit ici.
+    if (input.role) this.gateway.emitToRoom(roleRoom(input.salonId.toString(), input.role), input.type, notif);
     if (input.broadcast) this.gateway.emitToRoom(`salon:${input.salonId.toString()}`, input.type, notif);
     void this.sendPushForDispatch(input, notif);
     return notif;

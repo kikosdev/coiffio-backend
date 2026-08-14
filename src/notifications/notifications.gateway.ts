@@ -4,6 +4,22 @@ import { OnGatewayConnection, WebSocketGateway, WebSocketServer } from '@nestjs/
 import { Server, Socket } from 'socket.io';
 import { MembershipClaim } from '../common/decorators/current-user.decorator';
 
+/**
+ * Nom de la room "rôle", SCOPÉE PAR TENANT. Exporté et utilisé par les DEUX côtés (le join
+ * ici, l'emit dans `NotificationsService`) : un décalage de format entre join et emit ne
+ * fuirait pas — il ferait pire, plus personne ne recevrait rien, en silence.
+ *
+ * ⚠️ Corrige une fuite cross-tenant : la room était `role:{role}`, sans tenant. Deux owners
+ * de salons différents connectés en même temps rejoignaient la MÊME room `role:owner` et
+ * recevaient chacun les notifications temps réel de l'autre salon. La lecture HTTP, elle,
+ * n'a jamais fuité (`notifications` est TENANT_SCOPED, le plugin Mongoose injecte le
+ * salonId) — c'est ce qui a rendu le trou invisible : rien d'anormal dans les listes, la
+ * fuite n'existait que sur le canal socket, qui court-circuite Mongo.
+ */
+export function roleRoom(tenantId: string, role: string): string {
+  return `role:${tenantId}:${role}`;
+}
+
 const allowedOrigins = [
   process.env.FRONTEND_ORIGIN,
   process.env.DESKTOP_ORIGIN,
@@ -75,7 +91,7 @@ export class NotificationsGateway implements OnGatewayConnection {
       socket.join(`user:${sub}`);
       for (const m of memberships) {
         socket.join(`salon:${m.tenantId}`);
-        socket.join(`role:${m.role}`);
+        socket.join(roleRoom(m.tenantId, m.role));
         if (m.staffId) socket.join(`staff:${m.staffId}`);
       }
       (socket.data as { user?: { sub: string; memberships: MembershipClaim[] } }).user = { sub, memberships };
