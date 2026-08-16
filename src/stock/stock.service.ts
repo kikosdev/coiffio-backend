@@ -23,12 +23,13 @@ export class StockService {
     private readonly lossAlertService: LossAlertService,
   ) {}
 
-  async list(opts: { category?: string; activeOnly?: boolean; search?: string; inStock?: boolean }): Promise<ProductDocument[]> {
+  async list(opts: { category?: string; activeOnly?: boolean; search?: string; inStock?: boolean; isConsumable?: boolean }): Promise<ProductDocument[]> {
     const filter: FilterQuery<ProductDocument> = {};
     if (opts.category) filter.category = opts.category;
     if (opts.activeOnly) filter.active = true;
     if (opts.search) filter.name = { $regex: opts.search, $options: 'i' };
     if (opts.inStock) filter.stock = { $gt: 0 };
+    if (opts.isConsumable !== undefined) filter.isConsumable = opts.isConsumable;
     return this.productModel.find(filter).sort({ category: 1, name: 1 });
   }
 

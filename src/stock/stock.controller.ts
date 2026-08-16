@@ -56,6 +56,33 @@ export class StockController {
     return { data, message: 'OK' };
   }
 
+  /**
+   * F1-bis : liste BACKOFFICE, authentifiée — manquait entièrement (seule `list()` ci-dessus,
+   * publique par `:salonSlug`, existait). `products` est LOCATION_SCOPED (scoping-registry.ts) :
+   * contrairement à `ServicesController#list` (TENANT_SCOPED, `salonId` seul), le plugin
+   * injecte ICI `salonId` + `locationId` (la location courante du token) automatiquement sur
+   * `productModel.find(filter)` — aucune résolution de scope à faire à la main, même pattern
+   * que toute autre lecture LOCATION_SCOPED (ex. `SalesController`). Réutilise `StockService.list()`
+   * tel quel : c'est le même service method que la route publique, le filtrage tenant/location
+   * vient uniquement du `TenantContext` ambiant (guest vs JWT), pas d'un paramètre explicite.
+   */
+  @ApiOperation({ summary: 'List products for the current salon (backoffice)' })
+  @ApiResponse({ status: 200, description: 'OK' })
+  @ApiBearerAuth()
+  @Get('products')
+  @UseGuards(JwtGuard, RolesGuard)
+  @Roles('owner', 'manager', 'stylist', 'colorist')
+  async listBackoffice(@Query() query: ListProductsQueryDto) {
+    const data = await this.stock.list({
+      category: query.category,
+      activeOnly: query.activeOnly !== 'false',
+      search: query.search,
+      inStock: query.inStock === 'true',
+      isConsumable: query.isConsumable !== undefined ? query.isConsumable === 'true' : undefined,
+    });
+    return { data, message: 'OK' };
+  }
+
   @ApiOperation({ summary: 'Create a new product' })
   @ApiResponse({ status: 201, description: 'Product created.' })
   @ApiBearerAuth()

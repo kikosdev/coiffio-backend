@@ -99,4 +99,5 @@ export class ListProductsQueryDto {
   @IsOptional() @IsIn(['true', 'false']) activeOnly?: string;
   @IsOptional() @IsString() search?: string;
   @IsOptional() @IsIn(['true', 'false']) inStock?: string;
+  @IsOptional() @IsIn(['true', 'false']) isConsumable?: string;
 }
