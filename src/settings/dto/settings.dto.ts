@@ -60,6 +60,21 @@ export class UpdateSalonDto {
   businessHours?: BusinessHourDto[];
 }
 
+/** LC-7/LC-6.3/LC-8 (SKILL_loss_control_doses.md) — owner-only, sous-structure dédiée. */
+export class UpdateLossControlDto {
+  @IsOptional() @IsNumber() @Min(0) @Max(100)
+  varianceThresholdPct?: number;
+
+  @IsOptional() @IsNumber() @Min(1)
+  extremeUsageFactor?: number;
+
+  @IsOptional() @IsNumber() @Min(0) @Max(100)
+  productCommissionPct?: number;
+
+  @IsOptional() @IsBoolean()
+  alertsEnabled?: boolean;
+}
+
 export class CreateRoleDto {
   @IsString() @MinLength(2) @MaxLength(50)
   name: string;

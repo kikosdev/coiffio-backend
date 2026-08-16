@@ -57,6 +57,28 @@ export class Product {
 
   @Prop({ default: 0, min: 0 })
   salesCount: number;
+
+  // ── Loss control (LC-1, LC-7 — SKILL_loss_control_doses.md) ──────────────────
+  // Conditionnement : 1 unité de stock = `dosesPerUnit` doses consommables en service. Absent
+  // = produit non dosable (retail pur), refusé par `Service.doseConfig` (LC-T8).
+  @Prop({ min: 0 })
+  dosesPerUnit?: number;
+
+  // true = consommé pendant un service (FLUX A, doses) ; false = vendu tel quel (FLUX B,
+  // retail). Un produit peut être les deux à la fois (ex. cire vendue ET utilisée en service).
+  @Prop({ default: false })
+  isConsumable: boolean;
+
+  // Surcharge du seuil global `Salon.lossControl.varianceThresholdPct` pour CE produit.
+  // Absent = le seuil global s'applique.
+  @Prop({ min: 0, max: 100 })
+  varianceThresholdPct?: number;
+
+  // LC-5 (Prompt 3) : date du dernier comptage physique (StockMove kind:'inventory').
+  // Absent = jamais inventorié. Réservé à un futur rappel (cadence à la demande, aucune
+  // contrainte système posée ici).
+  @Prop()
+  lastInventoryAt?: Date;
 }
 
 export const ProductSchema = SchemaFactory.createForClass(Product);

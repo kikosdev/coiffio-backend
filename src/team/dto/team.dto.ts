@@ -17,6 +17,7 @@ import {
   MinLength,
   ValidateNested,
 } from 'class-validator';
+import { DeclareDoseLineDto } from '../../loss-control/dto/dose-log.dto';
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 const YMD = /^\d{4}-\d{2}-\d{2}$/;
@@ -197,6 +198,55 @@ export class PosSaleDto {
   @IsNumber()
   @Min(0)
   received?: number;
+}
+
+/**
+ * Encaissement walk-in qui ouvre son Appointment(source:'walkin') dans la MÊME transaction
+ * (LC-0, SKILL_loss_control_doses.md Prompt 0-bis). `clientPhone` est requis — clé
+ * merge-on-phone (#10), c'est l'ancrage LC-9. `clientName` optionnel, défaut "Client" côté
+ * service. `PosSaleDto`/`POST /pos/sale` reste inchangé pour les tickets 100% produit (aucun
+ * service rendu = rien à ancrer pour la déclaration de doses).
+ */
+export class PosSaleWithAppointmentDto {
+  @IsMongoId()
+  stylistId: string;
+
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
+  @Type(() => PosSaleLineDto)
+  items: PosSaleLineDto[];
+
+  @IsIn(['cash', 'card'])
+  method: 'cash' | 'card';
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  tip?: number;
+
+  /** Espèces remises par le client — archive le rendu de monnaie. Ignoré en carte. */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  received?: number;
+
+  @IsString()
+  @MinLength(1)
+  clientPhone: string;
+
+  @IsOptional()
+  @IsString()
+  clientName?: string;
+
+  /** LC-3/A4 (Prompt 3-bis) : doses déclarées inline — ferme le trou "aucune fenêtre entre
+   *  création et clôture" du walk-in atomique (LC-0). Même DTO de ligne que le POS standalone
+   *  (`DeclareDoseLineDto`, loss-control), pas de duplication de schéma de validation. */
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => DeclareDoseLineDto)
+  doses?: DeclareDoseLineDto[];
 }
 
 // ─── Schedule (weekly rota + overrides) ──────────────────────────────────────

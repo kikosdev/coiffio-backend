@@ -24,6 +24,18 @@ export interface CaisseEntry {
   affectsDrawer: boolean;
   staffName: string;
   note?: string;
+  /**
+   * LC-9 (SKILL_loss_control_doses.md, Prompt 7) — lève l'ambiguïté signalée en session
+   * précédente : `kind:'sale'` couvre DEUX collections (`Payment` via `FinanceService`, `Sale`
+   * seul via `SalesService`), et `id` était soit un `Payment._id` soit un `Sale._id` sans que
+   * le front puisse savoir lequel. `entryType` le dit explicitement — le moins invasif des
+   * deux choix envisagés (vs. un endpoint de détail par entrée, qui aurait dupliqué la
+   * résolution déjà faite ici).
+   */
+  entryType?: 'payment' | 'sale';
+  /** Présent UNIQUEMENT si `entryType:'payment'` ET que ce paiement est lié à un RDV (LC-0 :
+   *  RDV planifié comme walk-in en portent un désormais) — c'est l'ancrage LC-9. */
+  appointmentId?: string;
 }
 
 export interface CaisseTotalsDay {
@@ -204,6 +216,8 @@ export class CaisseService {
         affectsDrawer: method === 'cash',
         staffName: nameOf(p.stylistId),
         note: this.paymentNote(p),
+        entryType: 'payment',
+        appointmentId: p.appointmentId?.toString(),
       });
     }
 
@@ -218,6 +232,7 @@ export class CaisseService {
         amount: s.total,
         affectsDrawer: method === 'cash',
         staffName: nameOf(s.stylistId),
+        entryType: 'sale', // Sale orpheline (SalesService), jamais liée à un RDV
       });
     }
 
@@ -232,6 +247,8 @@ export class CaisseService {
         amount: -p.amount,
         affectsDrawer: method === 'cash',
         staffName: nameOf(p.refundedBy ?? p.stylistId),
+        entryType: 'payment',
+        appointmentId: p.appointmentId?.toString(),
       });
     }
 

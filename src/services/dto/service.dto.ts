@@ -1,4 +1,5 @@
 import {
+  IsArray,
   IsHexColor,
   IsIn,
   IsInt,
@@ -8,7 +9,9 @@ import {
   MaxLength,
   Min,
   MinLength,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 
 const GENDERS = ['men', 'women', 'universal'] as const;
 
@@ -78,6 +81,23 @@ export class UpdateServiceDto {
   @IsOptional()
   @IsHexColor()
   color?: string;
+}
+
+/** LC-2 (SKILL_loss_control_doses.md) — théorique attendu, un service peut consommer plusieurs produits. */
+export class DoseConfigEntryDto {
+  @IsString()
+  productId: string;
+
+  @IsNumber()
+  @Min(0.01)
+  doses: number;
+}
+
+export class UpdateServiceDoseConfigDto {
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => DoseConfigEntryDto)
+  doseConfig: DoseConfigEntryDto[];
 }
 
 export class ListServicesQueryDto {

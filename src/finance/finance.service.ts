@@ -9,7 +9,11 @@ import { Staff, StaffDocument } from '../team/schemas/staff.schema';
 import { Product, ProductDocument } from '../stock/schemas/product.schema';
 import { StockMove, StockMoveDocument } from '../stock/schemas/stock-move.schema';
 import { Appointment, AppointmentDocument } from '../booking/schemas/appointment.schema';
-import { CreatePaymentDto, CreateExpenseDto, UpdateExpenseDto } from './dto/finance.dto';
+import { DoseLog, DoseLogDocument } from '../loss-control/schemas/dose-log.schema';
+import { DoseLogService } from '../loss-control/dose-log.service';
+import { Salon, SalonDocument } from '../seed/schemas/salon.schema';
+import { BookingService } from '../booking/booking.service';
+import { CreatePaymentDto, CreateExpenseDto, UpdateExpenseDto, CreateWalkinSaleDto } from './dto/finance.dto';
 import { AuthUser } from '../common/decorators/current-user.decorator';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SOCKET_EVENTS } from '../common/socket-events';
@@ -40,8 +44,12 @@ export class FinanceService {
     @InjectModel(Product.name) private readonly productModel: Model<ProductDocument>,
     @InjectModel(StockMove.name) private readonly moveModel: Model<StockMoveDocument>,
     @InjectModel(Appointment.name) private readonly appointmentModel: Model<AppointmentDocument>,
+    @InjectModel(DoseLog.name) private readonly doseLogModel: Model<DoseLogDocument>,
+    @InjectModel(Salon.name) private readonly salonModel: Model<SalonDocument>,
     @InjectConnection() private readonly connection: Connection,
     private readonly notifications: NotificationsService,
+    private readonly bookingService: BookingService,
+    private readonly doseLogService: DoseLogService,
   ) {}
 
   private lineTotal(items: PaymentLine[], kind?: 'service' | 'product'): number {
@@ -59,15 +67,39 @@ export class FinanceService {
 
   // ─── Encaissement (décrément stock transactionnel #6 si lignes produit) ───────
 
-  async createPayment(dto: CreatePaymentDto): Promise<PaymentDocument> {
-    const stylist = await this.staffModel.findOne({ _id: dto.stylistId });
-    if (!stylist) throw new BadRequestException('Stylist not found.');
+  /**
+   * Construit les documents Payment/Sale (montant, commission, rendu de monnaie) sans les
+   * persister — factorisé entre `createPayment()` (chemin historique, gère sa propre session)
+   * et `createPaymentInSession()` (LC-0, appelée sous une transaction déjà ouverte par
+   * `createWalkinSale()`).
+   *
+   * LC-8 (Prompt 6) : `productCommissionPct` est un paramètre SÉPARÉ de `commissionPct`
+   * (service) — deux règles indépendantes, jamais mélangées. `commission` (service) N'EST PAS
+   * TOUCHÉE : même calcul, même arrondi, qu'avant ce prompt.
+   *
+   * ⚠️ Incohérence PRÉEXISTANTE constatée, non corrigée (règle absolue : ne pas toucher au
+   * calcul service) : `commission` arrondit à l'UNITÉ TND (`Math.round(x)`), perdant les
+   * millimes — alors que `changeGiven` (juste en dessous) et l'invariant "TND 3 décimales"
+   * préservent 3 décimales (`Math.round(x*1000)/1000`). `productCommission`, champ NEUF,
+   * suit l'invariant 3-décimales correctement plutôt que de reproduire l'incohérence.
+   */
+  private buildPaymentEntities(
+    dto: CreatePaymentDto,
+    stylist: StaffDocument,
+    commissionPct: number,
+    productCommissionPct: number,
+  ): {
+    buildPayment: Record<string, unknown>;
+    buildSale: (paymentId: Types.ObjectId) => Record<string, unknown>;
+    productLines: PaymentLine[];
+  } {
     const items = dto.items.map((i) => ({ ...i }));
     const amount = this.lineTotal(items);
     const tip = dto.tip ?? 0;
     const servicesTotal = this.lineTotal(items, 'service');
-    const profile = await this.profileModel.findOne({ userId: stylist._id });
-    const commission = Math.round((servicesTotal * (profile?.commissionPct ?? 0)) / 100);
+    const commission = Math.round((servicesTotal * commissionPct) / 100);
+    const productsTotal = this.lineTotal(items, 'product');
+    const productCommission = Math.round(((productsTotal * productCommissionPct) / 100) * 1000) / 1000;
     const date = new Date();
     const productLines = items.filter((i) => i.kind === 'product' && i.refId);
 
@@ -83,6 +115,7 @@ export class FinanceService {
       amount,
       tip,
       commission,
+      productCommission,
       method: dto.method,
       cashReceived,
       changeGiven: cashReceived === undefined ? undefined : Math.round((cashReceived - amount - tip) * 1000) / 1000,
@@ -97,6 +130,31 @@ export class FinanceService {
       paymentId,
       date,
     });
+
+    return { buildPayment, buildSale, productLines };
+  }
+
+  /** LC-8 (Prompt 6) — taux de commission produit, indépendant de la commission service. */
+  private async resolveProductCommissionPct(session?: ClientSession | null): Promise<number> {
+    const salon = await this.salonModel
+      .findById(getTenantContext().tenantId)
+      .select('lossControl')
+      .session(session ?? null)
+      .lean();
+    return salon?.lossControl?.productCommissionPct ?? 0;
+  }
+
+  async createPayment(dto: CreatePaymentDto): Promise<PaymentDocument> {
+    const stylist = await this.staffModel.findOne({ _id: dto.stylistId });
+    if (!stylist) throw new BadRequestException('Stylist not found.');
+    const profile = await this.profileModel.findOne({ userId: stylist._id });
+    const productCommissionPct = await this.resolveProductCommissionPct();
+    const { buildPayment, buildSale, productLines } = this.buildPaymentEntities(
+      dto,
+      stylist,
+      profile?.commissionPct ?? 0,
+      productCommissionPct,
+    );
 
     // Sans ligne produit : pas de transaction nécessaire.
     if (productLines.length === 0) {
@@ -129,12 +187,127 @@ export class FinanceService {
     }
   }
 
+  /**
+   * Variante de `createPayment()` qui s'exécute SOUS une transaction déjà ouverte par
+   * l'appelant (LC-0, `createWalkinSale()`) — jamais sa propre session, jamais son propre
+   * `withTransaction`. `session: null` = repli non-transactionnel (topologie standalone),
+   * mêmes garanties que `checkoutWithStock(null, ...)` ailleurs dans ce fichier.
+   */
+  private async createPaymentInSession(dto: CreatePaymentDto, session: ClientSession | null): Promise<PaymentDocument> {
+    const stylist = await this.staffModel.findOne({ _id: dto.stylistId }).session(session);
+    if (!stylist) throw new BadRequestException('Stylist not found.');
+    const profile = await this.profileModel.findOne({ userId: stylist._id }).session(session);
+    const productCommissionPct = await this.resolveProductCommissionPct(session);
+    const { buildPayment, buildSale, productLines } = this.buildPaymentEntities(
+      dto,
+      stylist,
+      profile?.commissionPct ?? 0,
+      productCommissionPct,
+    );
+    const payment = await this.checkoutWithStock(session, buildPayment, buildSale, productLines, dto.stylistId);
+    if (dto.appointmentId) await this.markAppointmentCompleted(dto.appointmentId, session);
+    return payment;
+  }
+
+  /**
+   * Walk-in encaissé au comptoir : Appointment(source:'walkin') + DoseLog (si déclarées
+   * inline, Prompt 3-bis) + Payment + Sale dans une SEULE transaction Mongo (LC-0,
+   * SKILL_loss_control_doses.md Prompt 0-bis). Sans l'Appointment, le service rendu ne peut
+   * jamais être ancré pour la déclaration de doses — `assertOpenForSale()` reste la
+   * responsabilité de l'appelant (`PosController`), comme pour `recordSale()`/`payAppointment()`.
+   *
+   * Un ticket 100 % produit (aucune ligne `kind:'service'`) n'a rien à ancrer — LC-0 ne
+   * s'applique qu'au service rendu — donc refusé ici ; `POST /pos/sale` reste le bon chemin
+   * pour ce cas et n'est pas modifié.
+   *
+   * Ordre DANS la transaction (Prompt 3-bis) : 1. createWalkin (Appointment booked) —
+   * 2. DoseLog depuis `dto.doses` (théorique résolu des services du ticket) —
+   * 3. createPaymentInSession (Payment+Sale) — 4. markAppointmentCompleted (verrouille les
+   * DoseLog), déjà appelée DEPUIS `createPaymentInSession` (Prompt 2). Un échec à N'IMPORTE
+   * quelle étape annule tout — même garantie transactionnelle que Prompt 0-bis, DoseLog inclus.
+   */
+  async createWalkinSale(
+    dto: CreateWalkinSaleDto,
+  ): Promise<{ appointment: AppointmentDocument; payment: PaymentDocument; doseLogs: DoseLogDocument[] }> {
+    const serviceLines = dto.items.filter((i) => i.kind === 'service');
+    if (serviceLines.length === 0) {
+      throw new BadRequestException('At least one service line is required to open a walk-in appointment.');
+    }
+    const serviceIds = serviceLines.map((i) => i.refId);
+
+    // A4 (Prompt 3-bis) : AVANT la transaction — vérifie le DTO (`dto.doses`), pas la base :
+    // ni l'Appointment ni les DoseLog n'existent encore à cet instant.
+    await this.doseLogService.assertDeclaredForWalkin(serviceIds, dto.doses);
+
+    const walkinDto = {
+      serviceIds,
+      stylistId: dto.stylistId,
+      clientPhone: dto.clientPhone,
+      clientName: dto.clientName?.trim() || 'Client',
+    };
+    const paymentDto: CreatePaymentDto = {
+      stylistId: dto.stylistId,
+      items: dto.items,
+      method: dto.method,
+      received: dto.received,
+      tip: dto.tip,
+    };
+
+    const run = async (session: ClientSession | null) => {
+      const appointment = await this.bookingService.createWalkin(walkinDto, session ?? undefined);
+      const doseLogs =
+        dto.doses && dto.doses.length > 0
+          ? await this.doseLogService.declareInSession(appointment, dto.stylistId, dto.doses, session)
+          : [];
+      const payment = await this.createPaymentInSession(
+        { ...paymentDto, appointmentId: (appointment._id as Types.ObjectId).toString() },
+        session,
+      );
+      return { appointment, payment, doseLogs };
+    };
+
+    const session = await this.connection.startSession();
+    let result: { appointment: AppointmentDocument; payment: PaymentDocument; doseLogs: DoseLogDocument[] };
+    try {
+      let txnResult: { appointment: AppointmentDocument; payment: PaymentDocument; doseLogs: DoseLogDocument[] } | undefined;
+      await session.withTransaction(async () => {
+        txnResult = await run(session);
+      });
+      result = txnResult!;
+    } catch (err) {
+      if (this.isTxnUnsupported(err)) {
+        this.logger.warn('Transactions unsupported — walk-in sale non-atomique (Mongo standalone).');
+        result = await run(null);
+      } else {
+        throw err;
+      }
+    } finally {
+      await session.endSession();
+    }
+
+    // LC-6/LC-10 (Prompt 5) : APRÈS commit, jamais depuis l'intérieur de la transaction —
+    // `LossControlAnalyticsService` relit sans session, un check lancé avant commit verrait
+    // un état pré-écriture (même raison que `DoseLogService.runAlertChecks()`).
+    if (result.doseLogs.length > 0) await this.doseLogService.runAlertChecks(result.doseLogs);
+    return result;
+  }
+
   // Un encaissement lié à un RDV en clôt le cycle de vie — le paiement est la seule
   // confirmation métier que le service a été rendu (aucune autre action ne le fait).
-  private async markAppointmentCompleted(appointmentId: string): Promise<void> {
+  private async markAppointmentCompleted(appointmentId: string, session?: ClientSession | null): Promise<void> {
     await this.appointmentModel.updateOne(
       { _id: appointmentId, status: { $ne: 'cancelled' } },
       { status: 'completed' },
+      session ? { session } : {},
+    );
+    // LC-4 (SKILL_loss_control_doses.md, Prompt 2) : la clôture verrouille TOUTE déclaration
+    // de doses de ce RDV — `lockedAt` posé ici est le seul verrou, `DoseLogService.declare()`
+    // refuse par ailleurs (409) dès que `appointment.status === 'completed'`. `$exists:false`
+    // rend l'appel idempotent (un `markAppointmentCompleted` rejoué ne touche rien de plus).
+    await this.doseLogModel.updateMany(
+      { appointmentId, lockedAt: { $exists: false } },
+      { $set: { lockedAt: new Date() } },
+      session ? { session } : {},
     );
   }
 

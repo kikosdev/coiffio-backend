@@ -59,6 +59,14 @@ export const TENANT_SCOPED = [
   'notifications',
   'testimonials',
   'invitations',
+  // LC-3 (SKILL_loss_control_doses.md, Prompt 2) : DoseLog n'a pas de locationId au schéma
+  // (skill le porte sans champ location — ancrage par appointmentId, jamais par lieu) —
+  // `salonId` seul, comme `services`. Évite aussi la friction owner multi-location : une
+  // correction post-verrouillage ne doit pas dépendre du "current location" actif du token.
+  'doselogs',
+  // LC-10 (Prompt 5) : même raison que `doselogs` — pas de locationId au schéma, l'owner doit
+  // voir toutes ses alertes quel que soit le "current location" actif de son token.
+  'lossalerts',
 ] as const;
 
 /** `salonId` + `locationId`. */

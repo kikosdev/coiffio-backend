@@ -1,7 +1,17 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { StockService } from './stock.service';
-import { CreateProductDto, UpdateProductDto, RestockDto, AdjustStockDto, ListProductsQueryDto } from './dto/stock.dto';
+import {
+  CreateProductDto,
+  UpdateProductDto,
+  UpdateProductDosesDto,
+  RestockDto,
+  AdjustStockDto,
+  ListProductsQueryDto,
+  CreateStockMovementDto,
+  CreateInventoryCountDto,
+  ListStockMovementsQueryDto,
+} from './dto/stock.dto';
 import { JwtGuard } from '../common/guards/jwt.guard';
 import { OptionalJwtGuard } from '../common/guards/optional-jwt.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
@@ -9,6 +19,10 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser, AuthUser } from '../common/decorators/current-user.decorator';
 import { GuestScopeService } from '../common/tenant/guest-scope.service';
 import { Destructive } from '../common/decorators/destructive.decorator';
+import { PosScopeGuard, PosUser } from '../common/guards/pos-scope.guard';
+import { CurrentPosUser } from '../common/decorators/current-pos-user.decorator';
+import { FeatureGuard } from '../common/entitlements/guards/feature.guard';
+import { RequiresFeature } from '../common/entitlements/decorators/requires-feature.decorator';
 
 /**
  * Stock & produits (Sprint 6). GET /:salonSlug/products public (storefront Sprint 7) ;
@@ -64,6 +78,18 @@ export class StockController {
     return { data, message: 'Product updated.' };
   }
 
+  /** LC-1/LC-7 (SKILL_loss_control_doses.md) — owner-only, séparé de `update()` (owner+manager). */
+  @ApiOperation({ summary: 'Configure a product for loss control (dosesPerUnit, isConsumable, varianceThresholdPct)' })
+  @ApiResponse({ status: 200, description: 'Product doses updated.' })
+  @ApiBearerAuth()
+  @Patch('products/:id/doses')
+  @UseGuards(JwtGuard, RolesGuard)
+  @Roles('owner')
+  async updateDoses(@Param('id') id: string, @Body() dto: UpdateProductDosesDto) {
+    const data = await this.stock.updateDoses(id, dto);
+    return { data, message: 'Product doses updated.' };
+  }
+
   @ApiOperation({ summary: 'Archive (soft-delete) a product' })
   @ApiResponse({ status: 200, description: 'Product archived.' })
   @ApiBearerAuth()
@@ -106,6 +132,48 @@ export class StockController {
   @Roles('owner', 'manager')
   async movements(@Query('productId') productId?: string) {
     const data = await this.stock.movements(productId);
+    return { data, message: 'OK' };
+  }
+
+  /**
+   * LC-5 (SKILL_loss_control_doses.md, Prompt 3) — comptoir : refill / ajustement / perte.
+   * `PosScopeGuard`, jamais `JwtGuard`+`RolesGuard` (poste PIN, sans role).
+   */
+  @ApiOperation({ summary: 'Declare a stock movement from the counter (refill, adjustment, loss)' })
+  @ApiResponse({ status: 201, description: 'Movement recorded.' })
+  @ApiBearerAuth()
+  @Post('pos/stock-movements')
+  @UseGuards(PosScopeGuard, FeatureGuard)
+  @RequiresFeature('pos')
+  async declareMovement(@CurrentPosUser() caller: PosUser, @Body() dto: CreateStockMovementDto) {
+    const data = await this.stock.declareMovement(dto, caller.staffId);
+    return { data, message: 'Movement recorded.' };
+  }
+
+  /**
+   * LC-5 — INVENTAIRE PHYSIQUE. LE point de vérité du loss control (Calc 2, Prompt 4) : sans
+   * cette saisie, l'écart de stock compare du théorique à du théorique. Cadence libre, aucune
+   * contrainte système — `Product.lastInventoryAt` sert de base à un futur rappel.
+   */
+  @ApiOperation({ summary: 'Record a physical inventory count (absolute value, not a delta)' })
+  @ApiResponse({ status: 201, description: 'Inventory recorded.' })
+  @ApiBearerAuth()
+  @Post('pos/stock-movements/count')
+  @UseGuards(PosScopeGuard, FeatureGuard)
+  @RequiresFeature('pos')
+  async declareInventoryCount(@CurrentPosUser() caller: PosUser, @Body() dto: CreateInventoryCountDto) {
+    const data = await this.stock.declareInventoryCount(dto, caller.staffId);
+    return { data, message: 'Inventory recorded.' };
+  }
+
+  @ApiOperation({ summary: 'Get the counter stock movement journal, filterable by period and product' })
+  @ApiResponse({ status: 200, description: 'OK' })
+  @ApiBearerAuth()
+  @Get('pos/stock-movements')
+  @UseGuards(PosScopeGuard, FeatureGuard)
+  @RequiresFeature('pos')
+  async listPosMovements(@Query() query: ListStockMovementsQueryDto) {
+    const data = await this.stock.movements(query.productId, query.period);
     return { data, message: 'OK' };
   }
 

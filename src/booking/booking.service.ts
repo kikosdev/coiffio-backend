@@ -7,7 +7,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
-import { Connection, FilterQuery, Model, Types } from 'mongoose';
+import { ClientSession, Connection, FilterQuery, Model, Types } from 'mongoose';
 import { randomInt, randomUUID } from 'crypto';
 import { Appointment, AppointmentDocument } from './schemas/appointment.schema';
 import { Service, ServiceDocument } from '../services/schemas/service.schema';
@@ -439,11 +439,11 @@ export class BookingService {
    * merge-on-phone reste une lecture interne bornée, jamais exposée telle quelle à
    * l'appelant, donc légitime même si le contexte ambiant ne l'autoriserait pas.
    */
-  private async resolveClient(input: ResolveClientInput): Promise<Types.ObjectId> {
+  private async resolveClient(input: ResolveClientInput, session?: ClientSession): Promise<Types.ObjectId> {
     const tenantId = getTenantContext().tenantId;
     return runWithTenant(systemReadContext(tenantId), async () => {
       if (input.clientId) {
-        const c = await this.clientModel.findOne({ _id: input.clientId }).exec();
+        const c = await this.clientModel.findOne({ _id: input.clientId }).session(session ?? null).exec();
         if (!c) throw new BadRequestException('Client not found.');
         if (input.userId && (!c.userId || c.userId.toString() === input.userId)) {
           c.userId = new Types.ObjectId(input.userId);
@@ -453,13 +453,13 @@ export class BookingService {
         }
         const phone = normalizedPhone(input.clientPhone);
         if (phone && c.phone !== phone) {
-          const duplicate = await this.clientModel.findOne({ _id: { $ne: c._id }, phone }).exec();
+          const duplicate = await this.clientModel.findOne({ _id: { $ne: c._id }, phone }).session(session ?? null).exec();
           if (!duplicate) c.phone = phone;
         }
         if (input.clientEmail && !c.email) {
           c.email = input.clientEmail.toLowerCase();
         }
-        await c.save();
+        await c.save({ session: session ?? null });
         return c._id as Types.ObjectId;
       }
       if (!input.clientName || !input.clientPhone) {
@@ -468,7 +468,7 @@ export class BookingService {
       const phone = normalizedPhone(input.clientPhone);
       if (!phone) throw new BadRequestException('Provide a valid clientPhone.');
       // merge-on-phone (#10) : un seul Client par phone dans le salon.
-      const existing = await this.clientModel.findOne({ phone }).exec();
+      const existing = await this.clientModel.findOne({ phone }).session(session ?? null).exec();
       if (existing) {
         if (input.userId && (!existing.userId || existing.userId.toString() === input.userId)) {
           existing.userId = new Types.ObjectId(input.userId);
@@ -476,20 +476,23 @@ export class BookingService {
         if (input.clientEmail && !existing.email) {
           existing.email = input.clientEmail;
         }
-        await existing.save();
+        await existing.save({ session: session ?? null });
         return existing._id as Types.ObjectId;
       }
-      const created = await this.clientModel.create({
-        userId: input.userId ? new Types.ObjectId(input.userId) : null,
-        name: input.clientName,
-        phone,
-        email: input.clientEmail ?? '',
-        commsConsent: true,
-        preferredChannel: 'email',
-        registered: false,
-        notes: '',
-        history: [],
-      });
+      const [created] = await this.clientModel.create(
+        [{
+          userId: input.userId ? new Types.ObjectId(input.userId) : null,
+          name: input.clientName,
+          phone,
+          email: input.clientEmail ?? '',
+          commsConsent: true,
+          preferredChannel: 'email',
+          registered: false,
+          notes: '',
+          history: [],
+        }],
+        session ? { session } : {},
+      );
       await this.clientProfiles.attachProfile(tenantId, (created._id as Types.ObjectId).toString(), created.phone, {
         name: created.name,
         email: created.email,
@@ -598,8 +601,14 @@ export class BookingService {
     await this.entitlements.checkSoftLimit(ctx.tenantId, 'appointmentsMonth', current, limit);
   }
 
-  /** Walk-in : source 'walkin', SANS check de dispo (peut chevaucher — décision design). */
-  async createWalkin(dto: CreateWalkinDto): Promise<AppointmentDocument> {
+  /**
+   * Walk-in : source 'walkin', SANS check de dispo (peut chevaucher — décision design).
+   * `session` optionnel (LC-0, SKILL_loss_control_doses.md Prompt 0-bis) : permet à
+   * `FinanceService.createWalkinSale()` de créer cet Appointment dans la MÊME transaction
+   * Mongo que le Payment/Sale — comportement par défaut (pas de session) inchangé pour
+   * l'appelant historique `POST /pos/walkin`.
+   */
+  async createWalkin(dto: CreateWalkinDto, session?: ClientSession): Promise<AppointmentDocument> {
     const services = await this.loadServices(dto.serviceIds);
     const { need, price } = this.totals(services);
 
@@ -609,22 +618,25 @@ export class BookingService {
     const startDay = start.toISOString().slice(0, 10);
 
     const stylist = await this.assertStylist(dto.stylistId);
-    const clientId = await this.resolveClient(dto);
+    const clientId = await this.resolveClient(dto, session);
 
     const checkInCode = await this.generateCheckInCode(startDay);
-    const appt = await this.apptModel.create({
-      stylistId: stylist._id,
-      clientId,
-      groupId: randomUUID(),
-      services: services.map((s) => s._id as Types.ObjectId),
-      start,
-      startDay,
-      end,
-      status: 'booked',
-      source: 'walkin',
-      price,
-      checkInCode,
-    });
+    const [appt] = await this.apptModel.create(
+      [{
+        stylistId: stylist._id,
+        clientId,
+        groupId: randomUUID(),
+        services: services.map((s) => s._id as Types.ObjectId),
+        start,
+        startDay,
+        end,
+        status: 'booked',
+        source: 'walkin',
+        price,
+        checkInCode,
+      }],
+      session ? { session } : {},
+    );
     void this.checkAppointmentsMonthSoftLimit();
     return appt;
   }

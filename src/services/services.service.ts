@@ -1,8 +1,9 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { FilterQuery, Model } from 'mongoose';
 import { Service, ServiceDocument, ServiceGender } from './schemas/service.schema';
-import { CreateServiceDto, UpdateServiceDto } from './dto/service.dto';
+import { Product, ProductDocument } from '../stock/schemas/product.schema';
+import { CreateServiceDto, UpdateServiceDto, UpdateServiceDoseConfigDto } from './dto/service.dto';
 
 /**
  * Catalogue services (Sprint 2). Prompt 6b : plus de `scope: SalonScope` en paramètre — le
@@ -12,7 +13,10 @@ import { CreateServiceDto, UpdateServiceDto } from './dto/service.dto';
  */
 @Injectable()
 export class ServicesService {
-  constructor(@InjectModel(Service.name) private readonly model: Model<ServiceDocument>) {}
+  constructor(
+    @InjectModel(Service.name) private readonly model: Model<ServiceDocument>,
+    @InjectModel(Product.name) private readonly productModel: Model<ProductDocument>,
+  ) {}
 
   /** Liste scopée, actifs uniquement par défaut, filtrable par gender. */
   async findAll(gender?: ServiceGender): Promise<ServiceDocument[]> {
@@ -49,6 +53,36 @@ export class ServicesService {
     if (dto.durationMin !== undefined) doc.durationMin = dto.durationMin;
     if (dto.bufferMin !== undefined) doc.bufferMin = dto.bufferMin;
     if (dto.color !== undefined) doc.color = dto.color;
+    await doc.save();
+    return doc;
+  }
+
+  /**
+   * LC-2/LC-T8 (SKILL_loss_control_doses.md) — owner-only, séparé de `update()`. Un produit
+   * ne peut entrer dans le théorique d'un service que s'il est dosable : `dosesPerUnit` posé
+   * ET `isConsumable:true`. Sans ce garde, un produit retail pur configuré par erreur
+   * produirait un théorique incalculable (division par `dosesPerUnit` absent, calcul 2).
+   */
+  async updateDoseConfig(id: string, dto: UpdateServiceDoseConfigDto): Promise<ServiceDocument> {
+    const doc = await this.findOne(id);
+
+    const productIds = [...new Set(dto.doseConfig.map((d) => d.productId))];
+    if (productIds.length) {
+      const products = await this.productModel
+        .find({ _id: { $in: productIds } })
+        .select('dosesPerUnit isConsumable')
+        .lean();
+      const byId = new Map(products.map((p) => [p._id.toString(), p]));
+      for (const productId of productIds) {
+        const product = byId.get(productId);
+        if (!product) throw new BadRequestException(`Produit introuvable : ${productId}.`);
+        if (!product.dosesPerUnit || !product.isConsumable) {
+          throw new BadRequestException("Ce produit n'est pas dosable.");
+        }
+      }
+    }
+
+    doc.doseConfig = dto.doseConfig;
     await doc.save();
     return doc;
   }

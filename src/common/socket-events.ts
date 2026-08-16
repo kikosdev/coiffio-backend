@@ -11,6 +11,8 @@ export const SOCKET_EVENTS = {
   SALE_RECORDED: 'sale.recorded',
   LEAVE_REQUESTED: 'leave.requested',
   STAFF_JOINED: 'staff.joined',
+  // LC-10 (SKILL_loss_control_doses.md, Prompt 5).
+  LOSS_ALERT: 'loss.alert',
 } as const;
 
 export type SocketEvent = (typeof SOCKET_EVENTS)[keyof typeof SOCKET_EVENTS];

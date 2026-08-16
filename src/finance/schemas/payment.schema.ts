@@ -51,7 +51,14 @@ export class Payment {
   tip: number;
 
   @Prop({ default: 0, min: 0 })
-  commission: number; // dérivée de StaffProfile.commissionPct au moment de l'encaissement
+  commission: number; // dérivée de StaffProfile.commissionPct au moment de l'encaissement (SERVICE)
+
+  // LC-8 (SKILL_loss_control_doses.md, Prompt 6) — DISTINCT de `commission` (service),
+  // délibérément : deux règles indépendantes, l'owner doit pouvoir les distinguer (audit,
+  // paie, litige). Assiette = lignes kind:'product' uniquement. Dérivée de
+  // Salon.lossControl.productCommissionPct au moment de l'encaissement.
+  @Prop({ default: 0, min: 0 })
+  productCommission: number;
 
   @Prop({ type: String, enum: ['cash', 'card'], default: 'cash' })
   method: PaymentMethod;

@@ -18,6 +18,10 @@ import { NotificationsController } from './notifications.controller';
   ],
   controllers: [NotificationsController],
   providers: [NotificationsService, NotificationsGateway],
-  exports: [NotificationsService],
+  // `NotificationsGateway` exporté (LC-10, Prompt 5) : `LossAlertService` a besoin d'émettre
+  // sur son PROPRE modèle (`LossAlert`, pas `Notification`) via `roleRoom()` — le même canal
+  // socket, une persistance différente. `NotificationsService.dispatch()` ne convient pas
+  // (il persiste dans `notifications`, pas `lossalerts`).
+  exports: [NotificationsService, NotificationsGateway],
 })
 export class NotificationsModule {}

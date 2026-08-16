@@ -7,7 +7,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Salon, SalonDocument } from '../seed/schemas/salon.schema';
 import { SalonRole, SalonRoleDocument } from './schemas/salon-role.schema';
-import { UpdateSalonDto, CreateRoleDto, UpdateRoleDto } from './dto/settings.dto';
+import { UpdateSalonDto, CreateRoleDto, UpdateRoleDto, UpdateLossControlDto } from './dto/settings.dto';
 import { getTenantContext } from '../common/tenant/tenant-context';
 import { PERMISSIONS, ROLE_DEFAULT_PERMISSIONS } from './permissions';
 
@@ -45,6 +45,27 @@ export class SettingsService {
       { new: true, runValidators: true },
     );
     if (!salon) throw new NotFoundException('Salon introuvable.');
+    return salon;
+  }
+
+  /**
+   * LC-7/LC-6.3/LC-8 (SKILL_loss_control_doses.md). ⚠️ Délibérément PAS `$set: dto` comme
+   * `updateSalon()` — cette dernière écrase le document AU NIVEAU RACINE avec le DTO brut, ce
+   * qui est sûr uniquement parce qu'`UpdateSalonDto` couvre des champs top-level (une clé
+   * absente du DTO n'apparaît pas dans l'objet, donc jamais posée dans `$set`). Ici la cible
+   * est une SOUS-structure (`lossControl.*`) : merge champ par champ, comme `ServicesService
+   * .update()` / `StockService.updateDoses()` — aucun champ non envoyé ne peut être écrasé,
+   * ni dans `lossControl` ni ailleurs sur `Salon` (mobile `salon-details.tsx` documente déjà
+   * ce risque pour `updateSalon()`, cf. commentaire côté client).
+   */
+  async updateLossControl(dto: UpdateLossControlDto): Promise<SalonDocument> {
+    const salon = await this.salonModel.findById(getTenantContext().tenantId);
+    if (!salon) throw new NotFoundException('Salon introuvable.');
+    if (dto.varianceThresholdPct !== undefined) salon.lossControl.varianceThresholdPct = dto.varianceThresholdPct;
+    if (dto.extremeUsageFactor !== undefined) salon.lossControl.extremeUsageFactor = dto.extremeUsageFactor;
+    if (dto.productCommissionPct !== undefined) salon.lossControl.productCommissionPct = dto.productCommissionPct;
+    if (dto.alertsEnabled !== undefined) salon.lossControl.alertsEnabled = dto.alertsEnabled;
+    await salon.save();
     return salon;
   }
 

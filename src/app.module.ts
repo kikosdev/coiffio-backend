@@ -30,6 +30,7 @@ import { TenantModule } from './common/tenant/tenant.module';
 import { TenantContextMiddleware } from './common/tenant/tenant-context.middleware';
 import { EntitlementsModule } from './common/entitlements/entitlements.module';
 import { InternalModule } from './internal/internal.module';
+import { LossControlModule } from './loss-control/loss-control.module';
 import { AppController } from './app.controller';
 
 @Module({
@@ -73,6 +74,7 @@ import { AppController } from './app.controller';
     TenantModule,
     EntitlementsModule,
     InternalModule,
+    LossControlModule,
   ],
   controllers: [AppController],
 })

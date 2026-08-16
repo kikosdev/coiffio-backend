@@ -48,6 +48,20 @@ export class SalonHoursEntry {
 }
 export const SalonHoursEntrySchema = SchemaFactory.createForClass(SalonHoursEntry);
 
+/**
+ * LC-7/LC-6.3/LC-8 (SKILL_loss_control_doses.md) : config owner du module loss control.
+ * `alertsEnabled` défaut `false` — le module reste silencieux tant que l'owner n'a pas
+ * configuré `dosesPerUnit`/`doseConfig` (sinon écarts 100% sur du théorique vide dès l'activation).
+ */
+@Schema({ _id: false })
+export class SalonLossControl {
+  @Prop({ default: 15, min: 0, max: 100 }) varianceThresholdPct: number;
+  @Prop({ default: 2, min: 1 }) extremeUsageFactor: number;
+  @Prop({ default: 0, min: 0, max: 100 }) productCommissionPct: number;
+  @Prop({ default: false }) alertsEnabled: boolean;
+}
+export const SalonLossControlSchema = SchemaFactory.createForClass(SalonLossControl);
+
 export interface SalonLocation {
   type: 'Point';
   coordinates: [number, number]; // [lng, lat] — ordre GeoJSON strict
@@ -129,6 +143,7 @@ export class Salon {
   @Prop({ type: SalonLandingSchema, default: () => ({}) }) landing: SalonLanding;
   @Prop({ type: SalonContactSchema, default: () => ({}) }) contact: SalonContact;
   @Prop({ type: [SalonHoursEntrySchema], default: [] }) hours: SalonHoursEntry[];
+  @Prop({ type: SalonLossControlSchema, default: () => ({}) }) lossControl: SalonLossControl;
 }
 
 export const SalonSchema = SchemaFactory.createForClass(Salon);

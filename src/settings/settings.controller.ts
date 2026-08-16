@@ -10,7 +10,7 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { SettingsService } from './settings.service';
-import { CreateRoleDto, UpdateRoleDto, UpdateSalonDto } from './dto/settings.dto';
+import { CreateRoleDto, UpdateRoleDto, UpdateSalonDto, UpdateLossControlDto } from './dto/settings.dto';
 import { JwtGuard } from '../common/guards/jwt.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -44,6 +44,16 @@ export class SettingsController {
   @Roles('owner')
   async updateSalon(@Body() dto: UpdateSalonDto) {
     const data = await this.settings.updateSalon(dto);
+    return { data, message: 'Paramètres enregistrés.' };
+  }
+
+  /** LC-7/LC-6.3/LC-8 (SKILL_loss_control_doses.md) — owner-only. */
+  @ApiOperation({ summary: 'Update the loss-control configuration (thresholds, commission, alerts)' })
+  @ApiResponse({ status: 200, description: 'Paramètres enregistrés.' })
+  @Patch('loss-control')
+  @Roles('owner')
+  async updateLossControl(@Body() dto: UpdateLossControlDto) {
+    const data = await this.settings.updateLossControl(dto);
     return { data, message: 'Paramètres enregistrés.' };
   }
 

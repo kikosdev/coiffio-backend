@@ -7,6 +7,7 @@ import { LeaveRequest, LeaveRequestSchema } from './schemas/leave-request.schema
 import { Appointment, AppointmentSchema } from '../booking/schemas/appointment.schema';
 import { Salon, SalonSchema } from '../seed/schemas/salon.schema';
 import { Service, ServiceSchema } from '../services/schemas/service.schema';
+import { Product, ProductSchema } from '../stock/schemas/product.schema';
 import { Client, ClientSchema } from '../clients/schemas/client.schema';
 import { TeamService } from './team.service';
 import { ScheduleService } from './schedule.service';
@@ -20,6 +21,7 @@ import { AuthModule } from '../auth/auth.module';
 import { BookingModule } from '../booking/booking.module';
 import { FinanceModule } from '../finance/finance.module';
 import { IdentityModule } from '../identity/identity.module';
+import { LossControlModule } from '../loss-control/loss-control.module';
 
 @Module({
   imports: [
@@ -28,6 +30,7 @@ import { IdentityModule } from '../identity/identity.module';
     BookingModule,
     FinanceModule,
     IdentityModule,
+    LossControlModule,
     MongooseModule.forFeature([
       { name: Staff.name,        schema: StaffSchema },
       { name: Schedule.name,     schema: ScheduleSchema },
@@ -36,6 +39,7 @@ import { IdentityModule } from '../identity/identity.module';
       { name: Appointment.name,  schema: AppointmentSchema },
       { name: Salon.name,        schema: SalonSchema },
       { name: Service.name,      schema: ServiceSchema },
+      { name: Product.name,      schema: ProductSchema },
       { name: Client.name,       schema: ClientSchema },
     ]),
   ],

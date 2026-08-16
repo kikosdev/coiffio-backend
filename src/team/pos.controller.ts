@@ -7,6 +7,7 @@ import { CurrentPosUser } from '../common/decorators/current-pos-user.decorator'
 import { Staff, StaffDocument, WeeklyShift } from './schemas/staff.schema';
 import { StaffProfile, StaffProfileDocument } from './schemas/staff-profile.schema';
 import { Service, ServiceDocument } from '../services/schemas/service.schema';
+import { Product, ProductDocument } from '../stock/schemas/product.schema';
 import { Client, ClientDocument } from '../clients/schemas/client.schema';
 import { Appointment, AppointmentDocument } from '../booking/schemas/appointment.schema';
 import { BookingService } from '../booking/booking.service';
@@ -16,8 +17,9 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationDocument } from '../notifications/schemas/notification.schema';
 import { FinanceService } from '../finance/finance.service';
 import { CaisseService } from '../finance/caisse.service';
+import { DoseLogService } from '../loss-control/dose-log.service';
 import { Salon, SalonDocument } from '../seed/schemas/salon.schema';
-import { PosPayDto, PosSaleDto } from './dto/team.dto';
+import { PosPayDto, PosSaleDto, PosSaleWithAppointmentDto } from './dto/team.dto';
 import { FeatureGuard } from '../common/entitlements/guards/feature.guard';
 import { RequiresFeature } from '../common/entitlements/decorators/requires-feature.decorator';
 
@@ -62,6 +64,11 @@ interface CatalogItem {
   category: string;
   price: number;
   durationMin: number;
+  // LC-3 (SKILL_loss_control_doses.md, Prompt 3-bis) : théorique attendu, produit par produit,
+  // pour que le ticket walk-in puisse afficher les lignes de doses à renseigner. `productName`
+  // dénormalisé ici — `/pos/catalog` n'expose que des services, jamais de Product brut, donc
+  // le nom doit être résolu côté serveur plutôt que forcer un second aller-retour catalogue.
+  doseConfig?: { productId: string; productName: string; doses: number }[];
 }
 
 interface TodayAppt {
@@ -121,10 +128,12 @@ export class PosController {
     @InjectModel(Client.name) private readonly clientModel: Model<ClientDocument>,
     @InjectModel(Appointment.name) private readonly apptModel: Model<AppointmentDocument>,
     @InjectModel(Salon.name) private readonly salonModel: Model<SalonDocument>,
+    @InjectModel(Product.name) private readonly productModel: Model<ProductDocument>,
     private readonly bookingService: BookingService,
     private readonly notificationsService: NotificationsService,
     private readonly financeService: FinanceService,
     private readonly caisseService: CaisseService,
+    private readonly doseLogService: DoseLogService,
   ) { }
 
   @ApiOperation({ summary: 'Get the POS staff roster, on-shift status first' })
@@ -221,9 +230,17 @@ export class PosController {
   async getCatalog(): Promise<{ data: CatalogItem[]; message: string }> {
     const services = await this.serviceModel
       .find({ active: true })
-      .select('name category price durationMin')
+      .select('name category price durationMin doseConfig')
       .sort({ category: 1, name: 1 })
       .lean();
+
+    // LC-3 (Prompt 3-bis) : résout les noms de produit référencés par les doseConfig — un seul
+    // aller-retour supplémentaire, jamais par service (évite le N+1).
+    const productIds = [...new Set(services.flatMap((s) => (s.doseConfig ?? []).map((d) => d.productId)))];
+    const products = productIds.length
+      ? await this.productModel.find({ _id: { $in: productIds } }).select('name').lean()
+      : [];
+    const productNameOf = new Map(products.map((p) => [(p._id as Types.ObjectId).toString(), p.name]));
 
     const data: CatalogItem[] = services.map((s) => ({
       id: (s._id as Types.ObjectId).toString(),
@@ -231,6 +248,11 @@ export class PosController {
       category: s.category || 'other',
       price: s.price,
       durationMin: s.durationMin,
+      doseConfig: (s.doseConfig ?? []).map((d) => ({
+        productId: d.productId,
+        productName: productNameOf.get(d.productId) ?? '—',
+        doses: d.doses,
+      })),
     }));
 
     return { data, message: 'OK' };
@@ -380,6 +402,9 @@ export class PosController {
     if (appt.status === 'completed') throw new BadRequestException('This appointment is already paid.');
     if (appt.status === 'cancelled') throw new BadRequestException('This appointment was cancelled.');
     await this.caisseService.assertOpenForSale();
+    // A4 (SKILL_loss_control_doses.md, Prompt 3, arbitrage validé) : bloque AVANT
+    // markAppointmentCompleted() si alertsEnabled + doseConfig non vide + aucun DoseLog.
+    await this.doseLogService.assertDeclaredIfRequired(id);
 
     const services = await this.serviceModel
       .find({ _id: { $in: appt.services } })
@@ -419,10 +444,19 @@ export class PosController {
   @Get('config')
   async getConfig(
     @CurrentPosUser() caller: PosUser,
-  ): Promise<{ data: { taxRate: number; currency: string }; message: string }> {
-    const salon = await this.salonModel.findById(caller.salonId).select('taxRate currency').lean();
+  ): Promise<{ data: { taxRate: number; currency: string; lossControlAlertsEnabled: boolean }; message: string }> {
+    const salon = await this.salonModel.findById(caller.salonId).select('taxRate currency lossControl').lean();
     if (!salon) throw new NotFoundException('Salon not found.');
-    return { data: { taxRate: salon.taxRate ?? 0, currency: salon.currency ?? 'TND' }, message: 'OK' };
+    return {
+      data: {
+        taxRate: salon.taxRate ?? 0,
+        currency: salon.currency ?? 'TND',
+        // LC-3 (Prompt 3-bis) : le ticket walk-in n'affiche la saisie de doses que si l'owner a
+        // opté dans le module (A4) — zéro friction pour un salon non opt-in.
+        lossControlAlertsEnabled: salon.lossControl?.alertsEnabled ?? false,
+      },
+      message: 'OK',
+    };
   }
 
   /**
@@ -444,6 +478,31 @@ export class PosController {
       received: dto.received,
     });
     return { data: { ok: true, paymentId: (payment._id as Types.ObjectId).toString() }, message: 'Sale recorded.' };
+  }
+
+  /**
+   * Encaissement walk-in AVEC ouverture de son Appointment(source:'walkin'), atomique
+   * (LC-0, SKILL_loss_control_doses.md Prompt 0-bis). Sans RDV, le service rendu ne peut
+   * jamais être ancré pour la déclaration de doses (loss control) — `POST /pos/sale` reste
+   * inchangé et reste le bon endpoint pour un ticket 100 % produit (rien à ancrer).
+   */
+  @ApiOperation({ summary: 'Record a walk-in sale, opening its Appointment atomically (Payment+Sale+Appointment+DoseLog)' })
+  @ApiResponse({ status: 201, description: 'Sale + appointment recorded.' })
+  @Post('sale-with-appointment')
+  async recordSaleWithAppointment(
+    @Body() dto: PosSaleWithAppointmentDto,
+  ): Promise<{ data: { ok: boolean; paymentId: string; appointmentId: string; doseLogsDeclared: number }; message: string }> {
+    await this.caisseService.assertOpenForSale();
+    const { appointment, payment, doseLogs } = await this.financeService.createWalkinSale(dto);
+    return {
+      data: {
+        ok: true,
+        paymentId: (payment._id as Types.ObjectId).toString(),
+        appointmentId: (appointment._id as Types.ObjectId).toString(),
+        doseLogsDeclared: doseLogs.length,
+      },
+      message: 'Sale + appointment recorded.',
+    };
   }
 
   @ApiOperation({ summary: 'Clock in the current POS staff member' })
