@@ -211,7 +211,7 @@ export class ClientsService {
             .find({ _id: { $in: userIds } })
             .select('identifier identifierType')
             .lean<{ _id: Types.ObjectId; identifier: string; identifierType: string }[]>()
-        : Promise.resolve([]),
+        : Promise.resolve<{ _id: Types.ObjectId; identifier: string; identifierType: string }[]>([]),
       this.clientProfiles.findEmailsByIds(profileIds),
     ]);
     const emailByUserId = new Map(
