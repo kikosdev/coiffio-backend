@@ -5,6 +5,7 @@ import { Client, ClientDocument, PreferredChannel } from './schemas/client.schem
 import { CreateClientDto, UpdateClientDto } from './dto/client.dto';
 import { Appointment, AppointmentDocument } from '../booking/schemas/appointment.schema';
 import { Salon, SalonDocument } from '../seed/schemas/salon.schema';
+import { User, UserDocument } from '../auth/schemas/user.schema';
 import { ClientProfileService } from '../identity/client-profile.service';
 import { getTenantContext } from '../common/tenant/tenant-context';
 
@@ -72,6 +73,7 @@ export class ClientsService {
     @InjectModel(Client.name) private readonly model: Model<ClientDocument>,
     @InjectModel(Appointment.name) private readonly apptModel: Model<AppointmentDocument>,
     @InjectModel(Salon.name) private readonly salonModel: Model<SalonDocument>,
+    @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
     private readonly clientProfiles: ClientProfileService,
   ) {}
 
@@ -166,12 +168,12 @@ export class ClientsService {
     );
   }
 
-  private toListItem(c: ClientDocument, stats?: ClientStats): ClientListItem {
+  private toListItem(c: ClientDocument, stats?: ClientStats, resolvedEmail?: string): ClientListItem {
     return {
       id: c._id.toString(),
       name: c.name,
       phone: c.phone,
-      email: c.email,
+      email: resolvedEmail ?? c.email,
       notes: c.notes,
       commsConsent: c.commsConsent,
       preferredChannel: c.preferredChannel,
@@ -179,6 +181,51 @@ export class ClientsService {
       totalSpentTnd: stats?.totalSpentTnd ?? 0,
       lastVisitDate: stats?.lastVisitDate ?? null,
     };
+  }
+
+  /**
+   * Enrichissement en LECTURE de `Client.email` quand il est vide (compte lié après coup,
+   * ou email jamais saisi sur ce doc tenant alors qu'il vit sur `User`/`ClientProfile`).
+   * Zéro écriture ici — au prochain "Enregistrer", `UpdateClientDto.email` backfill
+   * `Client.email` lui-même et ce lookup ne retrouve plus rien à faire pour ce client.
+   *
+   * Batché : au plus deux requêtes (`users`, `clientprofiles`) quel que soit le nombre de
+   * clients passés, jamais une par client. Les deux collections sont GLOBAL (scoping-registry),
+   * lisibles sans TenantContext.
+   *
+   * `User` n'a pas de champ `email` dédié — seulement `identifier` + `identifierType`
+   * ('email' | 'phone'). Un compte loggé par téléphone n'a donc rien d'exploitable ici :
+   * on retombe alors sur `ClientProfile.email` (rempli, lui, par le flux booking/attachProfile)
+   * si `profileId` est disponible.
+   */
+  private async resolveMissingEmails(clients: ClientDocument[]): Promise<Map<string, string>> {
+    const missing = clients.filter((c) => !c.email);
+    if (missing.length === 0) return new Map();
+
+    const userIds = [...new Set(missing.filter((c) => c.userId).map((c) => (c.userId as Types.ObjectId).toString()))];
+    const profileIds = [...new Set(missing.filter((c) => c.profileId).map((c) => c.profileId as string))];
+
+    const [users, emailByProfileId] = await Promise.all([
+      userIds.length
+        ? this.userModel
+            .find({ _id: { $in: userIds } })
+            .select('identifier identifierType')
+            .lean<{ _id: Types.ObjectId; identifier: string; identifierType: string }[]>()
+        : Promise.resolve([]),
+      this.clientProfiles.findEmailsByIds(profileIds),
+    ]);
+    const emailByUserId = new Map(
+      users.filter((u) => u.identifierType === 'email').map((u) => [u._id.toString(), u.identifier as string]),
+    );
+
+    const result = new Map<string, string>();
+    for (const c of missing) {
+      const viaUser = c.userId ? emailByUserId.get((c.userId as Types.ObjectId).toString()) : undefined;
+      const viaProfile = !viaUser && c.profileId ? emailByProfileId.get(c.profileId) : undefined;
+      const resolved = viaUser ?? viaProfile;
+      if (resolved) result.set((c._id as Types.ObjectId).toString(), resolved);
+    }
+    return result;
   }
 
   /** Liste scopée, recherche optionnelle `q` sur name/phone/email. */
@@ -189,28 +236,39 @@ export class ClientsService {
       filter.$or = [{ name: rx }, { phone: rx }, { email: rx }];
     }
     const clients = await this.model.find(filter).sort({ createdAt: -1 }).exec();
-    const stats = await this.statsByClientId(clients.map((c) => c._id as Types.ObjectId));
-    return clients.map((c) => this.toListItem(c, stats.get(c._id.toString())));
+    const [stats, resolvedEmails] = await Promise.all([
+      this.statsByClientId(clients.map((c) => c._id as Types.ObjectId)),
+      this.resolveMissingEmails(clients),
+    ]);
+    return clients.map((c) =>
+      this.toListItem(c, stats.get(c._id.toString()), resolvedEmails.get(c._id.toString())),
+    );
   }
 
   async findOne(id: string): Promise<ClientDetail> {
     const doc = await this.model.findOne({ _id: id }).exec();
     if (!doc) throw new NotFoundException('Client not found.');
 
-    const stats = await this.statsByClientId([doc._id as Types.ObjectId]);
-    const visits = await this.apptModel
-      .find({ clientId: doc._id, status: { $nin: ['cancelled', 'noshow'] } })
-      .sort({ start: -1 })
-      .limit(10)
-      .populate('services', 'name')
-      .lean();
+    const [stats, resolvedEmails, visits] = await Promise.all([
+      this.statsByClientId([doc._id as Types.ObjectId]),
+      this.resolveMissingEmails([doc]),
+      this.apptModel
+        .find({ clientId: doc._id, status: { $nin: ['cancelled', 'noshow'] } })
+        .sort({ start: -1 })
+        .limit(10)
+        .populate('services', 'name')
+        .lean(),
+    ]);
     const recentVisits: ClientVisit[] = visits.map((v: any) => ({
       serviceName: (v.services ?? []).map((s: any) => s?.name).filter(Boolean).join(', ') || 'Service',
       date: new Date(v.start).toISOString().slice(0, 10),
       priceTnd: v.price ?? 0,
     }));
 
-    return { ...this.toListItem(doc, stats.get(doc._id.toString())), recentVisits };
+    return {
+      ...this.toListItem(doc, stats.get(doc._id.toString()), resolvedEmails.get(doc._id.toString())),
+      recentVisits,
+    };
   }
 
   /** Raw doc read used internally by write paths (create/update) — no stats needed. */

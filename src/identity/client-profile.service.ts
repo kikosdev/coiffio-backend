@@ -246,6 +246,24 @@ export class ClientProfileService {
   }
 
   /**
+   * Lookup batché email par `ClientProfile._id` (string) — enrichissement en lecture de
+   * `ClientsService.findAll()`/`findOne()` (Client.email vide alors qu'un profil global en
+   * porte un). Un seul `find` quel que soit le nombre d'ids ; seuls les emails non vides
+   * sont inclus dans la map (un profil sans email n'ajoute aucune entrée, laissant l'appelant
+   * retomber sur ''). `email` reste GLOBAL, exempté du plugin de scope — pas de TenantContext requis.
+   */
+  async findEmailsByIds(profileIds: string[]): Promise<Map<string, string>> {
+    if (profileIds.length === 0) return new Map();
+    const profiles = await this.profileModel
+      .find({ _id: { $in: profileIds.map((id) => new Types.ObjectId(id)) } })
+      .select('email')
+      .lean();
+    return new Map(
+      profiles.filter((p) => p.email).map((p) => [(p._id as Types.ObjectId).toString(), p.email as string]),
+    );
+  }
+
+  /**
    * Tenants connus d'un client à partir de SA PROPRE fiche `Client` dans un tenant donné —
    * résout `profileId` puis renvoie `ClientProfile.tenantIds[]` (même donnée que
    * `getGlobalHistory`, mais le SET brut plutôt qu'un historique tout fait). Pour des
