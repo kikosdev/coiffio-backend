@@ -146,6 +146,17 @@ export class PosPayDto {
   @IsNumber()
   @Min(0)
   received?: number;
+
+  /** Aligne le RDV planifié classique sur le pattern walk-in (1 seul appel atomique) : doses
+   *  déclarées inline, créées DANS la même transaction que le paiement — même DTO de ligne que
+   *  le POS standalone et que `PosSaleWithAppointmentDto.doses` (`DeclareDoseLineDto`,
+   *  loss-control), pas de duplication de schéma de validation. Optionnel : un RDV déjà
+   *  déclaré via `POST /pos/appointments/:id/doses` (flux 2-appels) omet ce champ. */
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => DeclareDoseLineDto)
+  doses?: DeclareDoseLineDto[];
 }
 
 // ─── Vente POS libre (walk-in, sans rendez-vous) ─────────────────────────────

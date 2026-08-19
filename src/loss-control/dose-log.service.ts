@@ -185,22 +185,39 @@ export class DoseLogService {
    * (`createWalkinSale()`, Prompt 3-bis) utilise `assertDeclaredForWalkin()` — le trou ouvert
    * au Prompt 3 (aucune fenêtre entre création et clôture d'un walk-in) est refermé par les
    * doses inline du ticket, pas par cette méthode.
+   *
+   * `session` optionnel : aligne le RDV planifié classique sur le pattern walk-in atomique
+   * (1 appel, `FinanceService.payAppointmentWithDoses()`) — appelée APRÈS `declareInSession()`
+   * DANS la même transaction encore non commitée, un `countDocuments` scopé à cette session
+   * voit le DoseLog que `declareInSession()` vient d'y écrire (lecture causale intra-session
+   * Mongo), sans qu'aucune condition de garde n'ait besoin de changer. Le flux 2-appels
+   * standalone (`POST /doses` puis `POST /pay` sans `doses`) continue de fonctionner à
+   * l'identique : `session` reste `undefined`, `countDocuments` lit alors l'état déjà commité.
    */
-  async assertDeclaredIfRequired(appointmentId: string): Promise<void> {
-    const salon = await this.salonModel.findById(getTenantContext().tenantId).select('lossControl').lean();
+  async assertDeclaredIfRequired(appointmentId: string, session?: ClientSession | null): Promise<void> {
+    const salon = await this.salonModel
+      .findById(getTenantContext().tenantId)
+      .select('lossControl')
+      .session(session ?? null)
+      .lean();
     if (!salon?.lossControl?.alertsEnabled) return; // condition 1
 
-    const appt = await this.apptModel.findOne({ _id: appointmentId }).select('services').lean();
+    const appt = await this.apptModel
+      .findOne({ _id: appointmentId })
+      .select('services')
+      .session(session ?? null)
+      .lean();
     if (!appt) return; // 404 laissé au chemin appelant, pas notre rôle ici
 
     const services = await this.serviceModel
       .find({ _id: { $in: appt.services } })
       .select('name doseConfig')
+      .session(session ?? null)
       .lean();
     const dosableServices = services.filter((s) => (s.doseConfig ?? []).length > 0);
     if (dosableServices.length === 0) return; // condition 2
 
-    const declaredCount = await this.doseLogModel.countDocuments({ appointmentId });
+    const declaredCount = await this.doseLogModel.countDocuments({ appointmentId }).session(session ?? null);
     if (declaredCount > 0) return; // condition 3
 
     throw new ConflictException(this.buildUndeclaredMessage(dosableServices));

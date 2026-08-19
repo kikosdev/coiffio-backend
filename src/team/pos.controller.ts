@@ -98,7 +98,13 @@ interface PosApptDetail {
   column: 'waiting' | 'in_chair' | 'done';
   client: { name: string; phone: string; email: string };
   stylist: { name: string; color: string };
-  services: { id: string; name: string; price: number; durationMin: number }[];
+  services: {
+    id: string;
+    name: string;
+    price: number;
+    durationMin: number;
+    doseConfig: { productId: string; productName: string; doses: number }[];
+  }[];
 }
 
 // Shared by getToday() and getAppointmentDetail() — a manual check-in pins the card
@@ -340,9 +346,20 @@ export class PosController {
 
     const [client, services, stylist] = await Promise.all([
       this.clientModel.findById(appt.clientId).select('name phone email').lean(),
-      this.serviceModel.find({ _id: { $in: appt.services } }).select('name price durationMin').lean(),
+      this.serviceModel.find({ _id: { $in: appt.services } }).select('name price durationMin doseConfig').lean(),
       this.staffModel.findById(appt.stylistId).select('name color').lean(),
     ]);
+
+    // LC-3 (Prompt 3-bis, même pattern que getCatalog()) : résout les noms de produit
+    // référencés par les doseConfig des services de CE RDV — un seul aller-retour
+    // supplémentaire, jamais par service. Le desktop en a besoin pour construire l'étape de
+    // déclaration inline dans le ticket de paiement (expectedDoses), comme le fait déjà
+    // NewSaleView côté walk-in depuis `GET /pos/catalog`.
+    const productIds = [...new Set(services.flatMap((s) => (s.doseConfig ?? []).map((d) => d.productId)))];
+    const products = productIds.length
+      ? await this.productModel.find({ _id: { $in: productIds } }).select('name').lean()
+      : [];
+    const productNameOf = new Map(products.map((p) => [(p._id as Types.ObjectId).toString(), p.name]));
 
     return {
       data: {
@@ -366,6 +383,11 @@ export class PosController {
           name: s.name,
           price: s.price,
           durationMin: s.durationMin,
+          doseConfig: (s.doseConfig ?? []).map((d) => ({
+            productId: d.productId,
+            productName: productNameOf.get(d.productId) ?? '—',
+            doses: d.doses,
+          })),
         })),
       },
       message: 'OK',
@@ -402,9 +424,11 @@ export class PosController {
     if (appt.status === 'completed') throw new BadRequestException('This appointment is already paid.');
     if (appt.status === 'cancelled') throw new BadRequestException('This appointment was cancelled.');
     await this.caisseService.assertOpenForSale();
-    // A4 (SKILL_loss_control_doses.md, Prompt 3, arbitrage validé) : bloque AVANT
-    // markAppointmentCompleted() si alertsEnabled + doseConfig non vide + aucun DoseLog.
-    await this.doseLogService.assertDeclaredIfRequired(id);
+    // A4 (SKILL_loss_control_doses.md, Prompt 3, arbitrage validé) : la garde bloque désormais
+    // DANS la transaction de `payAppointmentWithDoses()`, APRÈS la déclaration inline
+    // éventuelle (`dto.doses`) — jamais ici en dehors de toute session, sinon un `dto.doses`
+    // fourni ne serait pas encore visible au moment du check (alignement RDV classique sur le
+    // pattern walk-in, 1 seul appel atomique).
 
     const services = await this.serviceModel
       .find({ _id: { $in: appt.services } })
@@ -422,13 +446,17 @@ export class PosController {
       items.push({ kind: 'service', refId: id, name: 'Service', qty: 1, unitPrice: appt.price ?? 0 });
     }
 
-    await this.financeService.createPayment({
-      appointmentId: id,
-      stylistId: appt.stylistId.toString(),
-      items,
-      method: dto.method,
-      received: dto.received,
-    });
+    await this.financeService.payAppointmentWithDoses(
+      id,
+      {
+        appointmentId: id,
+        stylistId: appt.stylistId.toString(),
+        items,
+        method: dto.method,
+        received: dto.received,
+      },
+      dto.doses,
+    );
 
     return { data: { ok: true }, message: 'Paid.' };
   }

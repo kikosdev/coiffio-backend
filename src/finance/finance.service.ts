@@ -11,6 +11,7 @@ import { StockMove, StockMoveDocument } from '../stock/schemas/stock-move.schema
 import { Appointment, AppointmentDocument } from '../booking/schemas/appointment.schema';
 import { DoseLog, DoseLogDocument } from '../loss-control/schemas/dose-log.schema';
 import { DoseLogService } from '../loss-control/dose-log.service';
+import { DeclareDoseLineDto } from '../loss-control/dto/dose-log.dto';
 import { Salon, SalonDocument } from '../seed/schemas/salon.schema';
 import { BookingService } from '../booking/booking.service';
 import { CreatePaymentDto, CreateExpenseDto, UpdateExpenseDto, CreateWalkinSaleDto } from './dto/finance.dto';
@@ -288,6 +289,66 @@ export class FinanceService {
     // LC-6/LC-10 (Prompt 5) : APRÈS commit, jamais depuis l'intérieur de la transaction —
     // `LossControlAnalyticsService` relit sans session, un check lancé avant commit verrait
     // un état pré-écriture (même raison que `DoseLogService.runAlertChecks()`).
+    if (result.doseLogs.length > 0) await this.doseLogService.runAlertChecks(result.doseLogs);
+    return result;
+  }
+
+  /**
+   * RDV planifié classique payé au comptoir (`PosController.payAppointment()`), aligné sur le
+   * même pattern 1-appel atomique que `createWalkinSale()` : DoseLog (si `doses` fourni,
+   * `declareInSession()` — même méthode que le walk-in, aucune logique de déclaration
+   * dupliquée) + `assertDeclaredIfRequired()` + Payment/Sale (`createPaymentInSession()`, qui
+   * appelle déjà `markAppointmentCompleted()` — verrouille les DoseLog qu'on vient de créer)
+   * dans UNE SEULE transaction Mongo.
+   *
+   * Ordre DANS la transaction : 1. `declareInSession` (si `doses`) — 2.
+   * `assertDeclaredIfRequired`, MÊME session : voit le DoseLog que l'étape 1 vient d'y écrire
+   * (countDocuments scopé session, encore non commité) — 3. `createPaymentInSession`. Un échec
+   * à N'IMPORTE quelle étape (doses non fournies alors que requises, RDV déjà clôturé…) annule
+   * tout, comme pour le walk-in.
+   *
+   * Le flux 2-appels standalone (`POST /pos/appointments/:id/doses` puis `POST .../pay` sans
+   * `doses`) n'est PAS touché : `doses` reste `undefined`, l'étape 1 est sautée, l'étape 2 lit
+   * alors le DoseLog déjà commité par l'appel précédent — comportement inchangé.
+   */
+  async payAppointmentWithDoses(
+    appointmentId: string,
+    paymentDto: CreatePaymentDto,
+    doses: DeclareDoseLineDto[] | undefined,
+  ): Promise<{ payment: PaymentDocument; doseLogs: DoseLogDocument[] }> {
+    const appt = await this.appointmentModel.findOne({ _id: appointmentId });
+    if (!appt) throw new NotFoundException('Appointment not found.');
+
+    const run = async (session: ClientSession | null) => {
+      const doseLogs =
+        doses && doses.length > 0
+          ? await this.doseLogService.declareInSession(appt, paymentDto.stylistId, doses, session)
+          : [];
+      await this.doseLogService.assertDeclaredIfRequired(appointmentId, session);
+      const payment = await this.createPaymentInSession(paymentDto, session);
+      return { payment, doseLogs };
+    };
+
+    const session = await this.connection.startSession();
+    let result: { payment: PaymentDocument; doseLogs: DoseLogDocument[] };
+    try {
+      let txnResult: { payment: PaymentDocument; doseLogs: DoseLogDocument[] } | undefined;
+      await session.withTransaction(async () => {
+        txnResult = await run(session);
+      });
+      result = txnResult!;
+    } catch (err) {
+      if (this.isTxnUnsupported(err)) {
+        this.logger.warn('Transactions unsupported — RDV pay+doses non-atomique (Mongo standalone).');
+        result = await run(null);
+      } else {
+        throw err;
+      }
+    } finally {
+      await session.endSession();
+    }
+
+    // LC-6/LC-10 (Prompt 5) : APRÈS commit seulement, même raison que `createWalkinSale()`.
     if (result.doseLogs.length > 0) await this.doseLogService.runAlertChecks(result.doseLogs);
     return result;
   }
