@@ -9,7 +9,7 @@ import { DeclareDoseLineDto } from './dto/dose-log.dto';
 import { getTenantContext } from '../common/tenant/tenant-context';
 import { LossAlertService } from './loss-alert.service';
 
-interface ExpectedLine {
+export interface ExpectedLine {
   serviceId: string;
   doses: number;
 }
@@ -51,8 +51,12 @@ export class DoseLogService {
    * PREMIER (ordre de `appointment.services[]`) : simplification documentée, un DoseLog porte
    * un `serviceId` singulier (schéma du skill) — cas rare (même produit consommé par 2
    * prestations du même RDV), à revisiter au calcul d'écart (Prompt 4) si ça s'avère fréquent.
+   *
+   * Public (Prompt 6, LC-6) : réutilisée telle quelle par `LossControlAnalyticsService
+   * .investigateAppointment()` pour afficher le théorique attendu-non-déclaré — même logique
+   * d'agrégation par produit, pas de duplication.
    */
-  private async resolveExpected(appt: AppointmentDocument, session?: ClientSession): Promise<Map<string, ExpectedLine>> {
+  async resolveExpected(appt: AppointmentDocument, session?: ClientSession): Promise<Map<string, ExpectedLine>> {
     const docs = await this.serviceModel
       .find({ _id: { $in: appt.services } })
       .select('name doseConfig')

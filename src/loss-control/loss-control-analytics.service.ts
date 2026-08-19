@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { forwardRef, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { FilterQuery, Model, Types } from 'mongoose';
 import { DoseLog, DoseLogDocument } from './schemas/dose-log.schema';
@@ -11,6 +11,7 @@ import { Appointment, AppointmentDocument } from '../booking/schemas/appointment
 import { Client, ClientDocument } from '../clients/schemas/client.schema';
 import { Staff, StaffDocument } from '../team/schemas/staff.schema';
 import { Service, ServiceDocument } from '../services/schemas/service.schema';
+import { DoseLogService } from './dose-log.service';
 import { AnalyticsPeriod } from './dto/loss-control-analytics.dto';
 import { startOfDayInTz, endOfDayInTz, isoDateInTz, shiftIsoDate } from '../common/time/tz-day.util';
 import { getTenantContext } from '../common/tenant/tenant-context';
@@ -48,9 +49,11 @@ export interface ExtremeUsageRow {
 export interface InvestigationDoseRow {
   productId: string;
   productName: string;
-  dosesDeclared: number;
+  /** `null` = attendu (théorique non nul) mais jamais déclaré — pas un 0 déclaré. */
+  dosesDeclared: number | null;
   dosesExpected: number;
-  variancePct: number;
+  /** `null` uniquement quand `dosesDeclared` l'est — aucun écart calculable sans déclaration. */
+  variancePct: number | null;
   lockedAt: string | null;
   correctedBy?: string;
   correctionNote?: string;
@@ -96,6 +99,13 @@ export class LossControlAnalyticsService {
     @InjectModel(Client.name) private readonly clientModel: Model<ClientDocument>,
     @InjectModel(Staff.name) private readonly staffModel: Model<StaffDocument>,
     @InjectModel(Service.name) private readonly serviceModel: Model<ServiceDocument>,
+    // forwardRef : ferme un cycle préexistant — DoseLogService -> LossAlertService ->
+    // LossControlAnalyticsService (loss-alert.service.ts:8) était déjà circulaire avant cet
+    // ajout ; cette arête (analytics -> doseLog, Prompt 6) le referme sur elle-même. Sans
+    // forwardRef ici, l'import circulaire entre les 3 fichiers laisse une classe `undefined`
+    // à l'évaluation, et Nest échoue à résoudre le provider au démarrage.
+    @Inject(forwardRef(() => DoseLogService))
+    private readonly doseLogService: DoseLogService,
   ) {}
 
   private periodRange(period: AnalyticsPeriod, ref = new Date()): { from: Date; to: Date } {
@@ -281,18 +291,27 @@ export class LossControlAnalyticsService {
    * l'absence de déclaration EST une information pour l'owner, pas un état cassé.
    */
   async investigateAppointment(appointmentId: string): Promise<InvestigationResult> {
-    const appt = await this.appointmentModel.findOne({ _id: appointmentId }).lean();
+    // Pas de `.lean()` : `resolveExpected()` (dose-log.service.ts) est typée pour un
+    // `AppointmentDocument` — un objet lean n'a pas les méthodes Document, seulement les
+    // mêmes champs en lecture (ce que ce handler utilise partout ailleurs de toute façon).
+    const appt = await this.appointmentModel.findOne({ _id: appointmentId });
     if (!appt) throw new NotFoundException('Appointment not found.');
 
-    const [client, stylist, services, doseLogs, payment] = await Promise.all([
+    const [client, stylist, services, expectedMap, doseLogs, payment] = await Promise.all([
       this.clientModel.findById(appt.clientId).select('name phone').lean(),
       this.staffModel.findById(appt.stylistId).select('name').lean(),
       this.serviceModel.find({ _id: { $in: appt.services } }).select('name price durationMin').lean(),
+      this.doseLogService.resolveExpected(appt),
       this.doseLogModel.find({ appointmentId }).sort({ productId: 1 }).lean(),
       this.paymentModel.findOne({ appointmentId: new Types.ObjectId(appointmentId) }).lean(),
     ]);
 
-    const productIds = [...new Set(doseLogs.map((d) => d.productId))];
+    // LC-6 (Prompt 6) : union expected ∪ declared — un produit attendu par le théorique mais
+    // sans DoseLog (jamais déclaré) doit apparaître quand même, pas seulement les lignes
+    // déjà déclarées (cf. docstring de classe : "l'absence de déclaration EST une
+    // information pour l'owner, pas un état cassé").
+    const declaredByProduct = new Map(doseLogs.map((d) => [d.productId, d]));
+    const productIds = [...new Set([...expectedMap.keys(), ...declaredByProduct.keys()])];
     const products = productIds.length
       ? await this.productModel.find({ _id: { $in: productIds } }).select('name').lean()
       : [];
@@ -313,16 +332,31 @@ export class LossControlAnalyticsService {
           durationMin: s.durationMin,
         })),
       },
-      doses: doseLogs.map((d) => ({
-        productId: d.productId,
-        productName: productNameOf.get(d.productId) ?? '—',
-        dosesDeclared: d.dosesDeclared,
-        dosesExpected: d.dosesExpected,
-        variancePct: d.variancePct,
-        lockedAt: d.lockedAt ? d.lockedAt.toISOString() : null,
-        correctedBy: d.correctedBy,
-        correctionNote: d.correctionNote || undefined,
-      })),
+      doses: productIds.map((productId): InvestigationDoseRow => {
+        const d = declaredByProduct.get(productId);
+        if (d) {
+          return {
+            productId,
+            productName: productNameOf.get(productId) ?? '—',
+            dosesDeclared: d.dosesDeclared,
+            dosesExpected: d.dosesExpected,
+            variancePct: d.variancePct,
+            lockedAt: d.lockedAt ? d.lockedAt.toISOString() : null,
+            correctedBy: d.correctedBy,
+            correctionNote: d.correctionNote || undefined,
+          };
+        }
+        // Attendu (théorique non nul) mais jamais déclaré.
+        const exp = expectedMap.get(productId)!;
+        return {
+          productId,
+          productName: productNameOf.get(productId) ?? '—',
+          dosesDeclared: null,
+          dosesExpected: exp.doses,
+          variancePct: null,
+          lockedAt: null,
+        };
+      }),
       payment: payment
         ? {
             id: (payment._id as Types.ObjectId).toString(),
