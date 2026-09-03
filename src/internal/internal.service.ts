@@ -18,7 +18,8 @@ import { startOfDayInTz, todayIsoInTz } from '../common/time/tz-day.util';
 import { MembershipService } from '../identity/membership.service';
 import { EmailService } from '../email/email.service';
 import { welcomeEmailHtml } from '../email/templates';
-import { ImpersonateDto, ProvisionTenantDto } from './dto/internal.dto';
+import { ImpersonateDto, ProvisionTenantDto, UpdateSalonSponsorshipDto } from './dto/internal.dto';
+import { DiscoveryCacheService } from '../discovery/discovery-cache.service';
 
 const BCRYPT_ROUNDS = 10;
 const WELCOME_TOKEN_TTL = '24h';
@@ -92,6 +93,15 @@ export interface OwnerLookupResult {
   ownerships?: OwnerOwnership[];
 }
 
+/** Forme exacte renvoyée par `updateSponsorship()` — jamais un champ de plus (pas de
+ *  `sponsoredUntil` sur la branche `sponsored:false`, `$unset` en base ⇒ `null` ici, pas
+ *  `undefined` qui disparaîtrait silencieusement du JSON de réponse). */
+export interface SponsorshipResult {
+  slug: string;
+  sponsored: boolean;
+  sponsoredUntil: Date | null;
+}
+
 export interface UsageResult {
   staffCount: number;
   locationCount: number;
@@ -117,6 +127,7 @@ export class InternalService {
     private readonly jwt: JwtService,
     private readonly memberships: MembershipService,
     private readonly email: EmailService,
+    private readonly discoveryCache: DiscoveryCacheService,
   ) {}
 
   /**
@@ -446,6 +457,54 @@ export class InternalService {
     if (!salon) throw new NotFoundException('Tenant not found.');
     this.logger.warn(`Tenant ${tenantId} status → ${status}.`);
     return { tenantId, status: salon.status };
+  }
+
+  /**
+   * [SKILL_discovery_enrichment_sponsored, Prompt 4, invalidation ajoutée Prompt 6 Partie A]
+   * Levier commercial CP uniquement (Décision #4) — jamais appelé depuis un contexte salon.
+   * `Salon` est UNSCOPED (`scoping-registry.ts`) : résolu par `slug` sans TenantContext,
+   * comme tout le reste de ce fichier. La règle "strictement future" est une comparaison
+   * d'INSTANT (Date > Date), pas de `date-fns-tz`/`toZonedTime()` ici — `sponsoredUntil` est
+   * un timestamp absolu ; le décaler par zone introduirait le même bug déjà documenté pour
+   * `isSponsoredActive()` côté DiscoveryService et pour les dates de booking côté front
+   * (`localDateISO()`).
+   *
+   * Persist → invalidate → réponse : sans l'invalidation, un toggle payant resterait invisible
+   * au Showcase jusqu'à 5 min (`CACHE_TTL_MS` de `DiscoveryService`) — inacceptable pour un
+   * placement commercial. `deleteByPrefix` plutôt qu'une clé exacte : `sponsored:${limit}` et
+   * `by-region:${region}:${limit}` varient par paramètre de requête, une seule clé invalidée
+   * laisserait les autres `limit`/régions périmés.
+   */
+  async updateSponsorship(slug: string, dto: UpdateSalonSponsorshipDto): Promise<SponsorshipResult> {
+    if (dto.sponsored) {
+      const until = new Date(dto.sponsoredUntil!);
+      if (until.getTime() <= Date.now()) {
+        throw new BadRequestException({
+          code: 'SPONSORED_UNTIL_NOT_FUTURE',
+          message: 'sponsoredUntil must be strictly in the future when sponsored:true.',
+        });
+      }
+      const salon = await this.salonModel
+        .findOneAndUpdate({ slug }, { $set: { sponsored: true, sponsoredUntil: until } }, { new: true })
+        .lean();
+      if (!salon) throw new NotFoundException('Salon not found.');
+      this.invalidateDiscoveryCaches();
+      this.logger.warn(`Salon ${slug} sponsorship → active until ${until.toISOString()}.`);
+      return { slug: salon.slug, sponsored: salon.sponsored, sponsoredUntil: salon.sponsoredUntil ?? null };
+    }
+
+    const salon = await this.salonModel
+      .findOneAndUpdate({ slug }, { $set: { sponsored: false }, $unset: { sponsoredUntil: 1 } }, { new: true })
+      .lean();
+    if (!salon) throw new NotFoundException('Salon not found.');
+    this.invalidateDiscoveryCaches();
+    this.logger.warn(`Salon ${slug} sponsorship → deactivated.`);
+    return { slug: salon.slug, sponsored: salon.sponsored, sponsoredUntil: null };
+  }
+
+  private invalidateDiscoveryCaches(): void {
+    this.discoveryCache.deleteByPrefix('sponsored:');
+    this.discoveryCache.deleteByPrefix('by-region:');
   }
 
   async usage(tenantId: string): Promise<UsageResult> {

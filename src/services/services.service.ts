@@ -4,6 +4,7 @@ import { FilterQuery, Model } from 'mongoose';
 import { Service, ServiceDocument, ServiceGender } from './schemas/service.schema';
 import { Product, ProductDocument } from '../stock/schemas/product.schema';
 import { CreateServiceDto, UpdateServiceDto, UpdateServiceDoseConfigDto } from './dto/service.dto';
+import { SalonCatalogService } from '../salons/salon-catalog.service';
 
 /**
  * Catalogue services (Sprint 2). Prompt 6b : plus de `scope: SalonScope` en paramètre — le
@@ -16,7 +17,14 @@ export class ServicesService {
   constructor(
     @InjectModel(Service.name) private readonly model: Model<ServiceDocument>,
     @InjectModel(Product.name) private readonly productModel: Model<ProductDocument>,
+    private readonly salonCatalog: SalonCatalogService,
   ) {}
+
+  /** Persist-then-recompute (SKILL_discovery_enrichment_sponsored, Prompt 1) — jamais avant
+   * l'écriture réelle du service, toujours après. */
+  private async recomputeCatalogAggregates(salonId: string): Promise<void> {
+    await Promise.all([this.salonCatalog.recomputePriceRange(salonId), this.salonCatalog.recomputeTags(salonId)]);
+  }
 
   /** Liste scopée, actifs uniquement par défaut, filtrable par gender. */
   async findAll(gender?: ServiceGender): Promise<ServiceDocument[]> {
@@ -32,7 +40,7 @@ export class ServicesService {
   }
 
   async create(dto: CreateServiceDto): Promise<ServiceDocument> {
-    return this.model.create({
+    const doc = await this.model.create({
       name: dto.name,
       category: dto.category ?? '',
       gender: dto.gender,
@@ -42,6 +50,8 @@ export class ServicesService {
       color: dto.color ?? '#B89968',
       active: true,
     });
+    await this.recomputeCatalogAggregates(doc.salonId);
+    return doc;
   }
 
   async update(id: string, dto: UpdateServiceDto): Promise<ServiceDocument> {
@@ -54,6 +64,7 @@ export class ServicesService {
     if (dto.bufferMin !== undefined) doc.bufferMin = dto.bufferMin;
     if (dto.color !== undefined) doc.color = dto.color;
     await doc.save();
+    await this.recomputeCatalogAggregates(doc.salonId);
     return doc;
   }
 
@@ -92,6 +103,7 @@ export class ServicesService {
     const doc = await this.findOne(id);
     doc.active = false;
     await doc.save();
+    await this.recomputeCatalogAggregates(doc.salonId);
     return doc;
   }
 }

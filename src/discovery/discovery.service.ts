@@ -8,11 +8,17 @@ import { Testimonial, TestimonialDocument } from '../public/schemas/testimonial.
 import { Staff, StaffDocument } from '../team/schemas/staff.schema';
 import { BookingService, StylistAvailability } from '../booking/booking.service';
 import { runAsDiscovery, runAsGuest } from '../common/tenant/tenant-context';
-import { MemoryCache } from '../common/utils/memory-cache.util';
+import { DiscoveryCacheService } from './discovery-cache.service';
 import { SalonAvailabilityQueryDto } from './dto/discovery.dto';
+import { PriceRange } from '../salons/salon-catalog.service';
 
 const CACHE_TTL_MS = 5 * 60_000;
 const SCRAPE_LOG_THRESHOLD = 50;
+// Plafond de candidats lus AVANT le tri sponsorisé-d'abord — sans lui, le `$limit`/`.limit()`
+// Mongo tronquerait la liste avant même de savoir qui est sponsorisé, et un salon sponsorisé
+// pourrait ne jamais atteindre le tri. Toujours >= au max DTO (50) pour que le tri porte sur
+// tout ce qu'un appelant peut légitimement demander.
+const DISCOVERY_CANDIDATE_CEILING = 50;
 
 export interface DiscoveryLocationHit {
   salonSlug: string;
@@ -25,15 +31,50 @@ export interface DiscoveryLocationHit {
   openingHours: unknown[];
   region?: string;
   distanceMeters: number | null;
+  coverImage: string | null;
+  priceRange: PriceRange | null;
+  serviceTags: string[];
+  sponsored: boolean;
 }
 
 export interface SalonProfile {
   slug: string;
   name: string;
+  coverImage: string | null;
+  priceRange: PriceRange | null;
+  serviceTags: string[];
+  sponsored: boolean;
   locations: Array<{ name: string; address: unknown; phone: string; openingHours: unknown[]; region?: string }>;
   services: Array<{ name: string; category: string; price: number; durationMin: number }>;
   testimonials: Array<{ quote: string; authorFirstName: string; createdAt: Date }>;
   team: Array<{ name: string; role: string; avatar: null }>;
+}
+
+export interface SponsoredSalonHit {
+  slug: string;
+  name: string;
+  city: string | null;
+  coverImage: string | null;
+  priceRange: PriceRange | null;
+  serviceTags: string[];
+}
+
+interface SponsorshipFields {
+  sponsored?: boolean;
+  sponsoredUntil?: Date | null;
+}
+
+/**
+ * `sponsored_actif` — calculé à la lecture, jamais lu tel quel (Décision #6 du skill).
+ * Comparaison d'INSTANT (Date > Date) : `sponsoredUntil` est un timestamp absolu (UTC en
+ * interne, comme tout Date Mongo/JS), donc `new Date(x).getTime() > Date.now()` suffit et
+ * est déjà correct. PAS de `toZonedTime()`/`formatInTimeZone()` ici : ça décalerait l'instant
+ * comparé de l'offset Africa/Tunis, exactement la classe de bug déjà rencontrée sur les
+ * dates de booking côté front (`localDateISO()`, jamais `toISOString()` pour ce genre de
+ * comparaison). date-fns-tz n'a de sens que pour un AFFICHAGE humain, jamais pour ce calcul.
+ */
+function isSponsoredActive(salon: SponsorshipFields): boolean {
+  return !!salon.sponsored && !!salon.sponsoredUntil && new Date(salon.sponsoredUntil).getTime() > Date.now();
 }
 
 /**
@@ -47,7 +88,6 @@ export interface SalonProfile {
 @Injectable()
 export class DiscoveryService {
   private readonly logger = new Logger(DiscoveryService.name);
-  private readonly cache = new MemoryCache();
 
   constructor(
     @InjectModel(Salon.name) private readonly salonModel: Model<SalonDocument>,
@@ -56,6 +96,9 @@ export class DiscoveryService {
     @InjectModel(Testimonial.name) private readonly testimonialModel: Model<TestimonialDocument>,
     @InjectModel(Staff.name) private readonly staffModel: Model<StaffDocument>,
     private readonly booking: BookingService,
+    // Injecté (Prompt 6, Partie A) plutôt qu'instancié en privé : la MÊME instance doit être
+    // invalidable depuis `InternalService.updateSponsorship()` après une écriture CP.
+    private readonly cache: DiscoveryCacheService,
   ) {}
 
   private logIfScraping(count: number, endpoint: string): void {
@@ -65,10 +108,28 @@ export class DiscoveryService {
   }
 
   /** Ensemble des salons actifs — jamais exposé tel quel, sert uniquement à filtrer
-   *  les locations/services/etc. par tenant autorisé. */
+   *  les locations/services/etc. par tenant autorisé. Porte aussi `sponsored`/`sponsoredUntil`
+   *  bruts (nécessaires à `isSponsoredActive()`) et `coverImage`/`priceRange`/`serviceTags`
+   *  — aucun des cinq n'est jamais renvoyé tel quel, voir le commentaire sur
+   *  `PUBLIC_DISCOVERY_FIELDS.salons`. */
   private async activeSalonMap(): Promise<Map<string, SalonDocument>> {
-    const salons = await this.salonModel.find({ status: 'active' }).select('name slug').exec();
+    const salons = await this.salonModel
+      .find({ status: 'active' })
+      .select('name slug coverImage priceRange serviceTags sponsored sponsoredUntil')
+      .exec();
     return new Map(salons.map((s) => [s._id.toString(), s]));
+  }
+
+  /** Tri from-scratch (aucun tri Mongo natif à ce jour sur by-region ; nearby est trié par
+   *  $geoNear, pas par sponsorship) : sponsorisé actif d'abord, puis le critère naturel de
+   *  l'endpoint. Appliqué en JS après lecture — sponsored vit sur `salons`, distance/nom sur
+   *  la ligne courante, pas de champ commun à agréger côté Mongo simplement. */
+  private sortDiscoveryHits(hits: DiscoveryLocationHit[], secondary: 'distance' | 'name'): DiscoveryLocationHit[] {
+    return [...hits].sort((a, b) => {
+      if (a.sponsored !== b.sponsored) return a.sponsored ? -1 : 1;
+      if (secondary === 'distance') return (a.distanceMeters ?? Infinity) - (b.distanceMeters ?? Infinity);
+      return a.salonName.localeCompare(b.salonName);
+    });
   }
 
   async nearby(lat: number, lng: number, radiusKm = 10, limit = 20): Promise<DiscoveryLocationHit[]> {
@@ -90,13 +151,14 @@ export class DiscoveryService {
                 query: { active: true, salonId: { $in: activeSalonIds } },
               },
             },
-            { $limit: limit },
+            { $limit: Math.max(limit, DISCOVERY_CANDIDATE_CEILING) },
           ])
           .exec();
 
         this.logIfScraping(rows.length, '/discovery/nearby');
 
-        return rows.map((r) => this.toLocationHit(r, activeSalons.get(r.salonId)!, r.distanceMeters));
+        const hits = rows.map((r) => this.toLocationHit(r, activeSalons.get(r.salonId)!, r.distanceMeters));
+        return this.sortDiscoveryHits(hits, 'distance').slice(0, limit);
       }),
     );
   }
@@ -112,13 +174,50 @@ export class DiscoveryService {
         const rows = await this.locationModel
           .find({ active: true, region, salonId: { $in: activeSalonIds } })
           .select('name address phone openingHours region salonId')
-          .limit(limit)
+          .limit(Math.max(limit, DISCOVERY_CANDIDATE_CEILING))
           .lean()
           .exec();
 
         this.logIfScraping(rows.length, '/discovery/by-region');
 
-        return rows.map((r) => this.toLocationHit(r as unknown as LocationDocument, activeSalons.get((r as unknown as LocationDocument).salonId)!, null));
+        const hits = rows.map((r) => this.toLocationHit(r as unknown as LocationDocument, activeSalons.get((r as unknown as LocationDocument).salonId)!, null));
+        return this.sortDiscoveryHits(hits, 'name').slice(0, limit);
+      }),
+    );
+  }
+
+  /** [Prompt 4, `city` ajouté Prompt 6] Salons sponsorisés actifs uniquement, triés par nom
+   *  (pas de rating en v1) — alimente la section Showcase de la landing plateforme. Liste
+   *  vide → [] ; le front masque la section entière plutôt que d'afficher un état vide
+   *  disgracieux dessus. `city` vient de la location primaire (pas de champ ville sur
+   *  `Salon` lui-même) — absente si la location n'a pas encore de `address.city` renseigné,
+   *  jamais fabriquée. */
+  async sponsored(limit = 8): Promise<SponsoredSalonHit[]> {
+    const key = `sponsored:${limit}`;
+    return this.cache.getOrSet(key, CACHE_TTL_MS, () =>
+      runAsDiscovery(async () => {
+        const activeSalons = await this.activeSalonMap();
+        const activeList = [...activeSalons.values()].filter((s) => isSponsoredActive(s));
+        if (activeList.length === 0) return [];
+
+        const salonIds = activeList.map((s) => s._id.toString());
+        const primaryLocations = await this.locationModel
+          .find({ salonId: { $in: salonIds }, isPrimary: true, active: true })
+          .select('salonId address')
+          .lean();
+        const cityBySalonId = new Map(primaryLocations.map((l) => [l.salonId, l.address?.city || null]));
+
+        const hits: SponsoredSalonHit[] = activeList
+          .map((s) => ({
+            slug: s.slug,
+            name: s.name,
+            city: cityBySalonId.get(s._id.toString()) ?? null,
+            coverImage: s.coverImage ?? null,
+            priceRange: s.priceRange ?? null,
+            serviceTags: s.serviceTags ?? [],
+          }))
+          .sort((a, b) => a.name.localeCompare(b.name));
+        return hits.slice(0, limit);
       }),
     );
   }
@@ -143,7 +242,10 @@ export class DiscoveryService {
 
   async salonProfile(slug: string): Promise<SalonProfile> {
     return runAsDiscovery(async () => {
-      const salon = await this.salonModel.findOne({ slug, status: 'active' }).select('name slug').exec();
+      const salon = await this.salonModel
+        .findOne({ slug, status: 'active' })
+        .select('name slug coverImage priceRange serviceTags sponsored sponsoredUntil')
+        .exec();
       if (!salon) throw new NotFoundException('Salon not found.');
       const salonId = salon._id.toString();
 
@@ -158,6 +260,10 @@ export class DiscoveryService {
       return {
         slug: salon.slug,
         name: salon.name,
+        coverImage: salon.coverImage ?? null,
+        priceRange: salon.priceRange ?? null,
+        serviceTags: salon.serviceTags ?? [],
+        sponsored: isSponsoredActive(salon),
         locations: locations.map((l) => ({ name: l.name, address: l.address, phone: l.phone, openingHours: l.openingHours, region: l.region })),
         services: services.map((s) => ({ name: s.name, category: s.category, price: s.price, durationMin: s.durationMin })),
         testimonials: testimonials.map((t) => ({
@@ -208,6 +314,10 @@ export class DiscoveryService {
       openingHours: loc.openingHours,
       region: loc.region,
       distanceMeters,
+      coverImage: salon.coverImage ?? null,
+      priceRange: salon.priceRange ?? null,
+      serviceTags: salon.serviceTags ?? [],
+      sponsored: isSponsoredActive(salon),
     };
   }
 }

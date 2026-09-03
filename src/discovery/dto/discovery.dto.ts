@@ -38,6 +38,15 @@ export class ByRegionQueryDto {
   limit?: number;
 }
 
+export class SponsoredQueryDto {
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(50)
+  @Type(() => Number)
+  limit?: number;
+}
+
 export class SalonAvailabilityQueryDto {
   @IsOptional()
   @IsMongoId()

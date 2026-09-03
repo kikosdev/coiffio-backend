@@ -35,4 +35,13 @@ export class MemoryCache {
   delete(key: string): void {
     this.store.delete(key);
   }
+
+  /** Invalidation par préfixe — pas de wildcard Redis ici, juste un scan du Map en mémoire
+   *  (négligeable à cette échelle). Utilisé quand une écriture peut affecter plusieurs clés
+   *  dérivées d'un même paramètre (ex. plusieurs `limit` différents sur le même endpoint). */
+  deleteByPrefix(prefix: string): void {
+    for (const key of this.store.keys()) {
+      if (key.startsWith(prefix)) this.store.delete(key);
+    }
+  }
 }

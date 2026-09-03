@@ -1,8 +1,8 @@
 import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
-import { DiscoveryService, DiscoveryLocationHit, SalonProfile } from './discovery.service';
-import { ByRegionQueryDto, NearbyQueryDto, SalonAvailabilityQueryDto } from './dto/discovery.dto';
+import { DiscoveryService, DiscoveryLocationHit, SalonProfile, SponsoredSalonHit } from './discovery.service';
+import { ByRegionQueryDto, NearbyQueryDto, SalonAvailabilityQueryDto, SponsoredQueryDto } from './dto/discovery.dto';
 import { StylistAvailability } from '../booking/booking.service';
 
 /**
@@ -37,6 +37,14 @@ export class DiscoveryController {
   @Get('regions')
   async regions(): Promise<{ data: string[]; message: string }> {
     const data = await this.discovery.regions();
+    return { data, message: 'OK' };
+  }
+
+  @ApiOperation({ summary: 'Active sponsored salons, sorted by name — feeds the storefront Showcase section' })
+  @ApiResponse({ status: 200, description: 'OK' })
+  @Get('sponsored')
+  async sponsored(@Query() q: SponsoredQueryDto): Promise<{ data: SponsoredSalonHit[]; message: string }> {
+    const data = await this.discovery.sponsored(q.limit ?? 8);
     return { data, message: 'OK' };
   }
 

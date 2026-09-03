@@ -8,6 +8,7 @@ import { Staff, StaffSchema } from '../team/schemas/staff.schema';
 import { BookingModule } from '../booking/booking.module';
 import { DiscoveryService } from './discovery.service';
 import { DiscoveryController } from './discovery.controller';
+import { DiscoveryCacheModule } from './discovery-cache.module';
 
 @Module({
   imports: [
@@ -19,6 +20,7 @@ import { DiscoveryController } from './discovery.controller';
       { name: Staff.name, schema: StaffSchema },
     ]),
     BookingModule,
+    DiscoveryCacheModule,
   ],
   controllers: [DiscoveryController],
   providers: [DiscoveryService],

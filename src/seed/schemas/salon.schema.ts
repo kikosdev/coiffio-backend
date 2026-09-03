@@ -89,6 +89,20 @@ export class SalonGeoPoint {
 }
 export const SalonGeoPointSchema = SchemaFactory.createForClass(SalonGeoPoint);
 
+/**
+ * Sous-schéma de classe (pas un objet littéral `{min:Number,max:Number}` inline) — même
+ * précaution que `SalonGeoPoint` ci-dessus : un objet littéral avec des clés qui ressemblent
+ * à des descripteurs de type peut être mal interprété par Mongoose. `min`/`max` n'a pas ce
+ * problème précis, mais on suit la convention déjà établie dans ce fichier plutôt que d'en
+ * introduire une seconde.
+ */
+@Schema({ _id: false })
+export class SalonPriceRange {
+  @Prop({ required: true, min: 0 }) min: number;
+  @Prop({ required: true, min: 0 }) max: number;
+}
+export const SalonPriceRangeSchema = SchemaFactory.createForClass(SalonPriceRange);
+
 @Schema({ timestamps: true })
 export class Salon {
   @Prop({ required: true }) name: string;
@@ -144,6 +158,21 @@ export class Salon {
   @Prop({ type: SalonContactSchema, default: () => ({}) }) contact: SalonContact;
   @Prop({ type: [SalonHoursEntrySchema], default: [] }) hours: SalonHoursEntry[];
   @Prop({ type: SalonLossControlSchema, default: () => ({}) }) lossControl: SalonLossControl;
+
+  // Découverte enrichie (SKILL_discovery_enrichment_sponsored, Prompt 1). Pas de
+  // rating/ratingCount ici — Testimonial n'a aucun champ note chiffrée à agréger
+  // aujourd'hui (confirmé au Prompt 0), donc ce chantier est explicitement hors scope v1.
+  @Prop({ type: String }) coverImage?: string;
+  // Dérivé des services actifs (SalonCatalogService), jamais saisi à la main. Absent
+  // (pas `{min:0,max:0}`) tant qu'aucun service actif n'existe.
+  @Prop({ type: SalonPriceRangeSchema }) priceRange?: SalonPriceRange;
+  // Catégories distinctes des services actifs, dérivées — jamais saisies à la main.
+  @Prop({ type: [String], default: [] }) serviceTags: string[];
+  // Levier commercial CP uniquement (jamais self-service côté salon) — un salon
+  // "sponsorisé actif" = sponsored:true ET sponsoredUntil > now (calculé à la lecture,
+  // jamais stocké tel quel).
+  @Prop({ type: Boolean, default: false }) sponsored: boolean;
+  @Prop({ type: Date }) sponsoredUntil?: Date;
 }
 
 export const SalonSchema = SchemaFactory.createForClass(Salon);

@@ -2,6 +2,7 @@ import { Type } from 'class-transformer';
 import {
   IsBoolean,
   IsIn,
+  IsISO8601,
   IsInt,
   IsMongoId,
   IsObject,
@@ -113,6 +114,23 @@ export class OwnerLookupQueryDto {
 export class UpdateTenantStatusDto {
   @IsIn(['active', 'suspended', 'churned'])
   status: 'active' | 'suspended' | 'churned';
+}
+
+/**
+ * [SKILL_discovery_enrichment_sponsored, Prompt 4] `sponsoredUntil` requis et validé au
+ * format ISO 8601 SEULEMENT quand `sponsored:true` (même pattern conditionnel que
+ * `ownerUserId`/`attachToExistingOwner` plus haut). La règle "strictement future" est un
+ * calcul dynamique (dépend de `now`), pas exprimable par un décorateur statique — vérifiée
+ * dans `InternalService.updateSponsorship()`, même choix que le reste de ce fichier (les
+ * règles métier vivent dans le service, les décorateurs ne valident que la forme).
+ */
+export class UpdateSalonSponsorshipDto {
+  @IsBoolean()
+  sponsored: boolean;
+
+  @ValidateIf((o: UpdateSalonSponsorshipDto) => o.sponsored === true)
+  @IsISO8601()
+  sponsoredUntil?: string;
 }
 
 export class ImpersonateDto {

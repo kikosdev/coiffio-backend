@@ -124,9 +124,19 @@ export const UNSCOPED = ['salons'] as const;
  *     `seniorityTag` sont déjà publics via `getPublicTeam()`. `userId` stocke en réalité
  *     Staff._id (cf. public.service.ts), déjà exposé comme `PublicBarber.staffId`.
  * Rien de sensible n'est ajouté ici (jamais email/phone/taxRate/passwordHash).
+ *
+ * [SKILL_discovery_enrichment_sponsored, Prompt 3] `coverImage`/`priceRange`/`serviceTags`
+ * ajoutés — public-safe tels quels, dérivés du catalogue (SalonCatalogService), jamais
+ * saisis à la main. `sponsored`/`sponsoredUntil` ajoutés aussi, MAIS jamais renvoyés tels
+ * quels par DiscoveryService — même schéma que `businessHours` juste au-dessus (whitelisté
+ * pour que `computeSalonIsOpen()` puisse le LIRE, alors que seul le booléen dérivé `isOpen`
+ * sort réellement) : ce registry contrôle ce qui est LISIBLE en base par le service, pas ce
+ * qui est RENVOYÉ par l'API — cette seconde garantie vient du typage explicite des objets
+ * de retour (`SalonProfile`/`DiscoveryLocationHit`/`SponsoredSalonHit`), qui n'ont
+ * structurellement pas de champ `sponsoredUntil` ni `sponsored` brut.
  */
 export const PUBLIC_DISCOVERY_FIELDS: Record<string, string[]> = {
-  salons: ['name', 'slug', 'address', 'businessHours'],
+  salons: ['name', 'slug', 'address', 'businessHours', 'coverImage', 'priceRange', 'serviceTags', 'sponsored', 'sponsoredUntil'],
   locations: ['name', 'address', 'phone', 'openingHours', 'region'],
   services: ['name', 'category', 'price', 'durationMin', 'salonId', 'gender'],
   testimonials: ['quote', 'authorName', 'isApproved', 'order', 'createdAt'],
