@@ -67,6 +67,12 @@ export const TENANT_SCOPED = [
   // LC-10 (Prompt 5) : même raison que `doselogs` — pas de locationId au schéma, l'owner doit
   // voir toutes ses alertes quel que soit le "current location" actif de son token.
   'lossalerts',
+  // SKILL_owner_paie_rh (P0-décision, TENANT_SCOPED confirmé) : la paie/l'avance sont de la
+  // RH salon-wide, pas ancrées à un comptoir — même raisonnement que `leaverequests`. Un
+  // changement de "current location" actif au token ne doit jamais masquer une avance/fiche
+  // de paie d'un staff qui travaille ailleurs dans le même salon.
+  'salaryadvances',
+  'salarypayments',
 ] as const;
 
 /** `salonId` + `locationId`. */

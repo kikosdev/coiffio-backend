@@ -13,6 +13,10 @@ export const SOCKET_EVENTS = {
   STAFF_JOINED: 'staff.joined',
   // LC-10 (SKILL_loss_control_doses.md, Prompt 5).
   LOSS_ALERT: 'loss.alert',
+  // SKILL_owner_paie_rh, Prompt 2/3.
+  ADVANCE_REQUESTED: 'advance.requested',
+  ADVANCE_DECIDED: 'advance.decided',
+  SALARY_PAID: 'salary.paid',
 } as const;
 
 export type SocketEvent = (typeof SOCKET_EVENTS)[keyof typeof SOCKET_EVENTS];

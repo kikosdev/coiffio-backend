@@ -34,6 +34,17 @@ export class StaffProfile {
   @Prop({ default: 0, min: 0, max: 100 })
   commissionPct: number;
 
+  // Paie & RH (SKILL_owner_paie_rh, P2/P0-décision) : salaire fixe mensuel, en millimes.
+  // Distinct de `baseRate` (dont la sémantique existante — horaire ? par prestation ? —
+  // n'était pas confirmée) : 0 = commission-only, valeur normale sinon. N'écrase jamais baseRate.
+  @Prop({ default: 0, min: 0 })
+  baseSalary: number;
+
+  // Jour de rappel de paie (1..28). Hors scope V1 (pas de cron/notif dessus) — champ posé
+  // pour un futur rappel automatique.
+  @Prop({ min: 1, max: 28 })
+  payDay?: number;
+
   @Prop({ default: true })
   isPublicOnLanding: boolean;
 
